@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: damusystem-backend
+Version: 0.1.0
+Summary: Local FastAPI bridge for the DaMuSystem desktop application
+Requires-Python: <3.13,>=3.12
+Requires-Dist: fastapi<1,>=0.116
+Requires-Dist: python-multipart<1,>=0.0.20
+Requires-Dist: uvicorn<1,>=0.35
+Requires-Dist: websockets<16,>=13
+Provides-Extra: dev
+Requires-Dist: httpx<1,>=0.28; extra == "dev"
+Requires-Dist: pytest<9,>=8.4; extra == "dev"

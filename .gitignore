@@ -1,0 +1,26 @@
+# Node / Electron
+desktop/node_modules/
+desktop/out/
+desktop/dist/
+desktop/release/
+
+# Python
+backend/.venv/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/build/
+backend/dist/
+**/__pycache__/
+*.py[cod]
+
+# Local runtime data
+.runtime/
+.tools/
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

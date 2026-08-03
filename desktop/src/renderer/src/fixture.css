@@ -1,0 +1,13 @@
+:root { color: #e9efea; background: #172019; font-family: 'IBM Plex Sans', 'Noto Sans SC', sans-serif; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+.fixture-body { background: #172019; }
+.fixture-stage { position: relative; width: 100%; height: 100%; padding: 24px 28px; display: flex; flex-direction: column; background-color: #172019; background-image: linear-gradient(rgba(167, 228, 107, .055) 1px, transparent 1px), linear-gradient(90deg, rgba(167, 228, 107, .055) 1px, transparent 1px); background-size: 32px 32px; }
+.fixture-stage::after { content: ''; position: absolute; inset: 12px; border: 1px solid rgba(167, 228, 107, .2); pointer-events: none; }
+.fixture-header, .fixture-footer { display: flex; align-items: center; justify-content: space-between; color: #87938b; font: 500 10px 'JetBrains Mono', monospace; letter-spacing: .1em; }
+.fixture-focus { margin: auto; width: min(680px, 88%); padding: 34px 38px; border: 1px solid #526058; background: rgba(13, 17, 15, .78); box-shadow: 0 18px 60px rgba(0, 0, 0, .24); }
+.fixture-focus p { margin: 0 0 20px; color: #a7e46b; font: 500 10px 'JetBrains Mono', monospace; letter-spacing: .12em; }
+.fixture-focus h1 { margin: 0; font-size: clamp(30px, 5.4vw, 54px); line-height: 1.1; font-weight: 600; letter-spacing: -.04em; }
+.fixture-rule { width: 80px; height: 3px; margin: 24px 0 18px; background: #a7e46b; }
+.fixture-focus span { color: #aeb8b1; font-size: 14px; }
+.fixture-footer strong { color: #e9efea; font-weight: 500; }

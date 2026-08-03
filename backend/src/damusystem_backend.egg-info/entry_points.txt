@@ -1,0 +1,2 @@
+[console_scripts]
+damusystem-backend = damusystem_backend.__main__:main
