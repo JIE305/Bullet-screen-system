@@ -7,6 +7,13 @@ Requires-Dist: fastapi<1,>=0.116
 Requires-Dist: python-multipart<1,>=0.0.20
 Requires-Dist: uvicorn<1,>=0.35
 Requires-Dist: websockets<16,>=13
+Requires-Dist: rapidocr<4,>=3.9
+Requires-Dist: onnxruntime<2,>=1.22
+Requires-Dist: opencv-python<5,>=4.10
+Requires-Dist: numpy<3,>=2
+Requires-Dist: SQLAlchemy<3,>=2.0
+Requires-Dist: alembic<2,>=1.16
+Requires-Dist: httpx<1,>=0.28
 Provides-Extra: dev
-Requires-Dist: httpx<1,>=0.28; extra == "dev"
 Requires-Dist: pytest<9,>=8.4; extra == "dev"
+Requires-Dist: pyinstaller<7,>=6.14; extra == "dev"

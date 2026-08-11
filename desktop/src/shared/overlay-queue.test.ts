@@ -4,19 +4,22 @@ import { OverlayMessageQueue, type OverlayScheduler } from './overlay-queue'
 function makeScheduler() {
   let nextHandle = 1
   const callbacks = new Map<number, () => void>()
+  const delays = new Map<number, number>()
   const cleared: number[] = []
   const scheduler: OverlayScheduler = {
-    setTimeout(callback) {
+    setTimeout(callback, delay) {
       const handle = nextHandle++
       callbacks.set(handle, callback)
+      delays.set(handle, delay)
       return handle
     },
     clearTimeout(handle) {
       cleared.push(handle as number)
       callbacks.delete(handle as number)
+      delays.delete(handle as number)
     }
   }
-  return { scheduler, callbacks, cleared }
+  return { scheduler, callbacks, delays, cleared }
 }
 
 describe('覆盖层弹幕队列', () => {
@@ -56,5 +59,16 @@ describe('覆盖层弹幕队列', () => {
 
     expect(queue.snapshot).toEqual([])
     expect(updates).toEqual([0, 0])
+  })
+
+  it('每条消息保留入队时长并用相同时长安排清理', () => {
+    const fake = makeScheduler()
+    const queue = new OverlayMessageQueue(() => undefined, fake.scheduler)
+
+    queue.add({ id: 'normal', text: '标准速度', duration: 7200 })
+    queue.add({ id: 'fast', text: '两倍速度', duration: 3600 })
+
+    expect(queue.snapshot.map((message) => message.duration)).toEqual([7200, 3600])
+    expect([...fake.delays.values()]).toEqual([7450, 3850])
   })
 })

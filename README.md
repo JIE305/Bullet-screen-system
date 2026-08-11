@@ -2,7 +2,7 @@
 
 DaMuSystem 是面向 Windows 窗口化游戏的本地画面弹幕实验项目。Electron 负责窗口选择、画面采集和透明覆盖显示，Python 服务负责识别、规则和后续持久化。
 
-当前进度：**里程碑 0 与第 1 周最小纵向链路已验收**。本阶段使用 `DummyRecognizer` 验证“捕获 → HTTP → Python → WebSocket → 覆盖层”，真实 OCR 和 SQLite 将在后续里程碑接入。
+当前进度：**第 1 周已封板，第 2、3 周核心功能已完成，第 4 周进入候选版本验收**。项目已具备 RapidOCR、单 ROI、规则去重/冷却、SQLite 六表持久化、PyInstaller 后端和 Electron Windows 安装包。
 
 ## 环境
 
@@ -23,16 +23,27 @@ DaMuSystem 是面向 Windows 窗口化游戏的本地画面弹幕实验项目。
 ```powershell
 .\scripts\test.ps1
 .\scripts\smoke-desktop.ps1
+.\scripts\smoke-ocr.ps1
 ```
 
-第一条命令运行后端单测、桌面端单测、TypeScript 类型检查和生产构建；第二条命令真实启动 Electron 与 Python，自动跑通测试画面到弹幕事件后退出。
+第一条命令运行后端单测、桌面端单测、TypeScript 类型检查和生产构建；后两条分别以 Dummy 与 RapidOCR 跑通真实 Electron 链路。生产包验证可使用 `.\scripts\smoke-desktop.ps1 -Packaged`。
 
-## 第 1 周手工演示
+## 开发版演示
 
 1. 启动应用，等待顶部状态变为“后端在线 / WS 已连接”。
 2. 点击“启动内置测试链路”。
 3. 应用打开测试画面，隐藏采集窗口以约 1 FPS 上传 JPEG。
-4. Python 的 `DummyRecognizer` 返回标准化识别事件和弹幕事件。
-5. 透明覆盖层显示弹幕；点击“停止会话”结束采集。
+4. 在“识别区域”和“弹幕规则”中调整 ROI、预处理、关键词、阈值和冷却。
+5. Python 的 RapidOCR 返回真实识别结果，经去重与规则生成弹幕。
+6. 透明覆盖层显示弹幕；点击“停止会话”结束采集。
 
-详细资料见 [架构说明](./docs/architecture.md)、[接口契约](./docs/contracts.md)、[数据模型](./docs/data-model.md)与[第 1 周报告](./docs/milestone-1-report.md)。
+## Windows 打包
+
+```powershell
+.\scripts\package.ps1
+.\scripts\smoke-desktop.ps1 -Packaged
+```
+
+安装器输出为 `desktop\release\DaMuSystem Setup 0.1.0.exe`。打包脚本会优先使用已安装的 Electron 运行时，并为 electron-builder 工具链配置镜像；生产应用不依赖系统 Node 或 Python。
+
+详细资料见 [架构说明](./docs/architecture.md)、[接口契约](./docs/contracts.md)、[数据模型](./docs/data-model.md)、[第 1 周报告](./docs/milestone-1-report.md)与[候选版本报告](./docs/milestone-2-4-report.md)。

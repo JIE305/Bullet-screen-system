@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-第 1 周只验证最小纵向链路，不接入 OCR、SQLite 或云端模型。为修复覆盖层切换问题，已使用 Python 标准库 Win32 API 加入基础窗口边界查询，Electron 每 250 ms 检查一次并只在位置或尺寸变化时更新覆盖层；更完整的最小化、关闭与 DPI 跟踪仍留在第 3 周。临时状态保存在 Python 进程内，重启后清空。
+项目已进入第 4 周候选版本：RapidOCR、单 ROI、规则引擎、SQLite 与 Windows 打包均已接入。Electron 每 250 ms 检查目标窗口边界，只在位置或尺寸变化时更新覆盖层；目标窗口连续不可用约 2 秒后安全停止会话。
 
 ```mermaid
 flowchart LR
@@ -11,8 +11,10 @@ flowchart LR
     Capture -->|JPEG 帧 IPC| Main
     Main -->|HTTP| API[FastAPI]
     API --> Queue[容量为 1 的最新帧队列]
-    Queue --> Dummy[DummyRecognizer]
-    Dummy -->|WebSocket 事件| Main
+    Queue --> OCR[RapidOCR / DummyRecognizer]
+    OCR --> Rules[标准化、去重、冷却、规则]
+    Rules --> DB[SQLite 单写入队列]
+    Rules -->|WebSocket 事件| Main
     Main -->|IPC| Overlay[透明弹幕覆盖层]
 ```
 
@@ -20,17 +22,19 @@ flowchart LR
 
 | 模块 | 唯一职责 | 阻塞策略 |
 |---|---|---|
-| Vue 配置窗口 | 选择来源、启停会话、展示状态 | 不执行图像与网络工作 |
+| Vue 配置窗口 | 选择来源、管理全局多关键词规则、启停会话、展示状态 | 不执行图像与网络工作 |
 | Electron 主进程 | 子进程、认证、HTTP/WebSocket、窗口编排 | 网络调用异步执行 |
 | 隐藏采集 Renderer | 获取授权视频流、裁剪和 JPEG 编码 | 每秒一帧；上次上传未结束时跳过 |
 | 透明覆盖层 | 展示弹幕，不参与业务决策 | CSS 动画；鼠标穿透 |
-| FastAPI | 校验请求、管理会话和事件订阅 | OCR 类工作交给后台任务 |
+| FastAPI | 校验请求、管理会话和事件订阅 | OCR 放入单线程执行器 |
 | 最新帧队列 | 每个会话只保存一个等待帧 | 新帧替换旧帧 |
-| DummyRecognizer | 为纵向链路返回可预测结果 | 第 2 周替换为 RapidOCR |
+| Recognizer | Dummy 与 RapidOCR 共用可替换接口 | OCR 实例生命周期内只创建一次 |
+| RuleEngine | NFKC、阈值、3 秒去重、规则诊断与独立冷却；真实窗口加载全局规则，允许仅识别模式 | 不阻塞事件循环 |
+| SQLite | 六表配置与事件持久化 | 默认回滚日志、短事务、后台单写者 |
 
 ## 安全边界
 
 - 只捕获用户主动选择的公开窗口，不注入进程、不读取游戏内存。
 - Electron Renderer 启用 `contextIsolation`、禁用 `nodeIntegration`，只暴露白名单 IPC。
 - Python 只监听 `127.0.0.1`，所有 HTTP/WebSocket 请求必须携带随机令牌。
-- 原始帧只存在内存中，当前阶段不写文件、不写数据库。
+- 原始帧只存在内存中，不写文件、不进入数据库；配置和结构化事件才会持久化。

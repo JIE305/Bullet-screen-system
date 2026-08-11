@@ -7,13 +7,13 @@ describe('覆盖层 Z-order', () => {
     const window: OverlayZOrderWindow = {
       isDestroyed: () => false,
       showInactive: vi.fn(() => calls.push('showInactive')),
-      setAlwaysOnTop: vi.fn((flag) => calls.push(`setAlwaysOnTop:${flag}`)),
+      setAlwaysOnTop: vi.fn((flag, level) => calls.push(`setAlwaysOnTop:${flag}:${level}`)),
       moveTop: vi.fn(() => calls.push('moveTop'))
     }
 
     restoreOverlayZOrder(window)
 
-    expect(calls).toEqual(['showInactive', 'setAlwaysOnTop:true', 'moveTop'])
+    expect(calls).toEqual(['showInactive', 'moveTop', 'setAlwaysOnTop:true:screen-saver'])
   })
 
   it('不会操作已经销毁的窗口', () => {

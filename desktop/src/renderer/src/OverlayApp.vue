@@ -8,9 +8,11 @@ import {
 } from '../../shared/overlay-queue'
 import {
   cloneDefaultOverlayStyle,
+  effectiveDanmakuDuration,
   overlayStyleVariables,
   parseOverlayStyleSettings
 } from '../../shared/overlay-style'
+import { getDanmakuText } from '../../shared/event-log'
 
 const messages = ref<OverlayMessage[]>([])
 const settings = ref(cloneDefaultOverlayStyle())
@@ -42,10 +44,14 @@ onMounted(async () => {
       return
     }
     if (event.type !== 'danmaku.created') return
-    const duration = Number(event.payload.duration_ms ?? 7200)
+    const text = getDanmakuText(event)
+    const duration = effectiveDanmakuDuration(
+      event.payload.duration_ms,
+      settings.value.speedMultiplier
+    )
     queue.add({
       id: String(event.payload.message_id ?? event.event_id),
-      text: String(event.payload.text ?? ''),
+      text,
       duration,
       tone: eventTone(event.payload.style)
     })
@@ -79,7 +85,7 @@ onUnmounted(() => {
       :key="message.id"
       class="danmaku-message"
       :class="message.tone"
-      :style="{ top: `${36 + message.lane * 54}px`, animationDuration: `${message.duration}ms` }"
+      :style="{ top: `${36 + message.lane * 54}px`, '--message-duration': `${message.duration}ms` }"
     >
       <span class="signal-mark" aria-hidden="true"></span>
       {{ message.text }}
@@ -90,7 +96,7 @@ onUnmounted(() => {
 <style>
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent !important; }
 .overlay-stage { position: relative; width: 100%; height: 100%; overflow: hidden; pointer-events: none; font-family: var(--danmaku-font-family); }
-.danmaku-message { --danmaku-tone: #a7e46b; position: absolute; left: 100%; max-width: min(680px, 70vw); display: flex; align-items: center; gap: 10px; padding: 10px 15px 10px 11px; border: 1px solid color-mix(in srgb, var(--danmaku-tone) 46%, rgba(233, 239, 234, .56)); border-radius: 6px; color: var(--danmaku-text-color); background: var(--danmaku-background); box-shadow: 0 8px 30px rgba(0, 0, 0, .28); backdrop-filter: blur(7px); font-family: var(--danmaku-font-family); font-size: var(--danmaku-font-size); font-weight: var(--danmaku-font-weight); line-height: 1.2; white-space: nowrap; text-shadow: 0 1px 4px rgba(0, 0, 0, .85); animation: travel linear forwards; will-change: transform; }
+.danmaku-message { --danmaku-tone: #a7e46b; --message-duration: 7200ms; position: absolute; left: 100%; max-width: min(680px, 70vw); display: flex; align-items: center; gap: 10px; padding: 10px 15px 10px 11px; border: 1px solid color-mix(in srgb, var(--danmaku-tone) 46%, rgba(233, 239, 234, .56)); border-radius: 6px; color: var(--danmaku-text-color); background: var(--danmaku-background); box-shadow: 0 8px 30px rgba(0, 0, 0, .28); backdrop-filter: blur(7px); font-family: var(--danmaku-font-family); font-size: var(--danmaku-font-size); font-weight: var(--danmaku-font-weight); line-height: 1.2; white-space: nowrap; text-shadow: 0 1px 4px rgba(0, 0, 0, .85); animation: travel var(--message-duration) linear forwards; will-change: transform; }
 .danmaku-message.warning { --danmaku-tone: #e7b75f; }
 .danmaku-message.danger { --danmaku-tone: #db6b63; }
 .signal-mark { width: 4px; height: 20px; flex: 0 0 auto; border-radius: 1px; background: var(--danmaku-tone); }

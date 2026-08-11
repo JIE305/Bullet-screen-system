@@ -9,6 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import create_app
+from .recognition import DummyRecognizer, RapidOcrRecognizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,7 +33,14 @@ def main() -> None:
         if server is not None:
             server.should_exit = True
 
-    app = create_app(token=token, shutdown_callback=request_shutdown)
+    recognizer_name = os.environ.get("DAMU_RECOGNIZER", "rapidocr").casefold()
+    recognizer = DummyRecognizer() if recognizer_name == "dummy" else RapidOcrRecognizer()
+    app = create_app(
+        token=token,
+        shutdown_callback=request_shutdown,
+        recognizer=recognizer,
+        data_dir=args.data_dir,
+    )
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="info")
     )
@@ -53,4 +61,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

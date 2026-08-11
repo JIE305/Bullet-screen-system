@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import {
   cloneDefaultOverlayStyle,
+  migrateOverlayStyleSettings,
   parseOverlayStyleSettings,
   type OverlayStyleSettings
 } from '../shared/overlay-style'
@@ -17,7 +18,7 @@ export class OverlayStyleStore {
   async load(): Promise<OverlayStyleSettings> {
     try {
       const content = await readFile(this.filePath, 'utf8')
-      return parseOverlayStyleSettings(JSON.parse(content) as unknown)
+      return migrateOverlayStyleSettings(JSON.parse(content) as unknown)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         this.warn(`弹幕样式文件无效，已恢复默认值：${error instanceof Error ? error.message : String(error)}`)

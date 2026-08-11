@@ -1,15 +1,24 @@
 import type { AppState, CaptureSourceInfo, DaMuApi, EventEnvelope } from '../../shared/contracts'
+import type { RuleSettings } from '../../shared/capture-settings'
 import {
   cloneDefaultOverlayStyle,
   parseOverlayStyleSettings,
   type OverlayStyleSettings
 } from '../../shared/overlay-style'
+import {
+  cloneDefaultCloudApiSettings,
+  type CloudApiRuntimeState
+} from '../../shared/cloud-api'
 
 const stateCallbacks = new Set<(state: AppState) => void>()
 const eventCallbacks = new Set<(event: EventEnvelope) => void>()
 const overlayResetCallbacks = new Set<() => void>()
 const overlayStyleCallbacks = new Set<(settings: OverlayStyleSettings) => void>()
+const cloudApiStateCallbacks = new Set<(state: CloudApiRuntimeState) => void>()
 let mockOverlayStyle = cloneDefaultOverlayStyle()
+let mockGlobalRules: RuleSettings[] = []
+let mockCloudSettings = cloneDefaultCloudApiSettings()
+let mockCloudState: CloudApiRuntimeState = { status: 'unconfigured' }
 let mockState: AppState = {
   backend: 'online',
   connection: 'connected',
@@ -53,6 +62,50 @@ const browserPreviewApi: DaMuApi = {
     }, 350)
   },
   startSource: async () => browserPreviewApi.startDemo(),
+  getCaptureSettings: async () => null,
+  getGlobalRules: async () => mockGlobalRules.map((rule) => ({ ...rule })),
+  updateGlobalRules: async (rules) => {
+    mockGlobalRules = rules.map((rule) => ({ ...rule, id: rule.id ?? crypto.randomUUID() }))
+    return mockGlobalRules.map((rule) => ({ ...rule }))
+  },
+  getCloudApiSettings: async () => ({ ...mockCloudSettings }),
+  saveCloudApiSettings: async (input) => {
+    const hasApiKey = input.deleteApiKey ? false : Boolean(input.apiKey) || mockCloudSettings.hasApiKey
+    mockCloudSettings = {
+      schemaVersion: 1,
+      enabled: input.enabled && hasApiKey,
+      baseUrl: input.baseUrl,
+      model: input.model,
+      systemPrompt: input.systemPrompt,
+      timeoutMs: input.timeoutMs,
+      maxCallsPerMinute: input.maxCallsPerMinute,
+      hasApiKey,
+      secretStorage: hasApiKey ? 'memory' : 'none'
+    }
+    mockCloudState = {
+      status: mockCloudSettings.enabled ? 'ready' : hasApiKey ? 'disabled' : 'unconfigured',
+      model: mockCloudSettings.model
+    }
+    for (const callback of cloudApiStateCallbacks) callback({ ...mockCloudState })
+    return { ...mockCloudSettings }
+  },
+  testCloudApi: async () => {
+    mockCloudState = { status: 'calling', model: mockCloudSettings.model }
+    for (const callback of cloudApiStateCallbacks) callback({ ...mockCloudState })
+    const result = {
+      text: '这波胜利太漂亮了！',
+      elapsedMs: 128,
+      model: mockCloudSettings.model || 'preview-model'
+    }
+    mockCloudState = {
+      status: mockCloudSettings.enabled ? 'ready' : 'disabled',
+      model: result.model,
+      lastLatencyMs: result.elapsedMs,
+      lastResult: result.text
+    }
+    for (const callback of cloudApiStateCallbacks) callback({ ...mockCloudState })
+    return result
+  },
   stopSession: async () => {
     for (const callback of overlayResetCallbacks) callback()
     emitMockState({ session: 'idle', sessionId: undefined, activeWindow: undefined })
@@ -95,6 +148,11 @@ const browserPreviewApi: DaMuApi = {
   onOverlayStyle: (callback) => {
     overlayStyleCallbacks.add(callback)
     return () => overlayStyleCallbacks.delete(callback)
+  },
+  onCloudApiState: (callback) => {
+    cloudApiStateCallbacks.add(callback)
+    callback({ ...mockCloudState })
+    return () => cloudApiStateCallbacks.delete(callback)
   }
 }
 

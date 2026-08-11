@@ -15,10 +15,11 @@
 |---|---|---|
 | GET | `/api/v1/health` | 后端、识别器和存储状态 |
 | GET | `/api/v1/windows/{hwnd}/bounds` | 读取目标窗口当前桌面坐标与尺寸 |
-| GET/POST | `/api/v1/profiles` | 列出或创建内存配置 |
-| GET/PATCH/DELETE | `/api/v1/profiles/{id}` | 读取、修改或删除内存配置 |
-| POST | `/api/v1/sessions` | 启动采集会话 |
-| DELETE | `/api/v1/sessions/{id}` | 停止采集会话 |
+| GET/POST | `/api/v1/profiles` | 列出或创建 SQLite 配置 |
+| GET/PATCH/DELETE | `/api/v1/profiles/{id}` | 读取、修改或删除 SQLite 配置 |
+| GET/PUT | `/api/v1/rules/global` | 读取或原子替换所有真实窗口共享的关键词规则 |
+| POST | `/api/v1/sessions` | 启动采集会话；`rule_scope=global` 使用全局规则，`profile` 使用配置规则 |
+| DELETE | `/api/v1/sessions/{id}` | 停止采集会话；可选 `reason` 查询参数 |
 | POST | `/api/v1/sessions/{id}/frames` | 上传区域 JPEG 与帧元数据 |
 | POST | `/api/v1/shutdown` | 父 Electron 进程安全关闭后端 |
 
@@ -37,7 +38,7 @@
 }
 ```
 
-第 1 周事件类型：
+冻结的 v1 事件类型：
 
 - `session.status`
 - `recognition.detected`
@@ -64,3 +65,7 @@
 4. WebSocket 断开后按 0.5、1、2、4、5 秒退避重连；断开期间暂停帧上传。
 5. Electron 退出时调用认证关闭接口；3 秒后仍未退出才终止子进程。
 6. 生产模式改为启动 `resources/backend/damusystem-backend.exe`，接口保持不变。
+
+`recognition.detected` 包含真实文字、标准化文字、置信度、可选文字框、内容哈希、`processing_ms` 与 `rule_evaluation`。规则结论为 `no_rule`、`not_matched`、`cooldown` 或 `emitted`，并附带已检查规则，供控制台解释为何没有生成弹幕。`danmaku.created` 包含来源识别事件、规则、正文、样式、持续时间与 `processing_ms`。这些都是 v1 payload 的兼容性扩展，HTTP 路径和事件包版本保持不变。
+
+真实窗口统一读取全局规则列表；列表为空时处于“仅识别”模式：继续产生 `recognition.detected`，但不会产生 `danmaku.created`。内置测试链路使用配置级“包含测试”规则，不会污染全局关键词。

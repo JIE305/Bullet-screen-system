@@ -17,3 +17,7 @@ export function boundsEqual(
       current.height === next.height
   )
 }
+
+export function isWindowUnavailableError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('404 ')
+}

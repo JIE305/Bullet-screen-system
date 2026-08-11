@@ -38,15 +38,45 @@ describe('弹幕样式持久化', () => {
     expect(warn).toHaveBeenCalledOnce()
   })
 
+  it('加载旧版文件时保留样式并补充默认速度', async () => {
+    const { store, path } = await makeStore()
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        fontFamily: 'mono',
+        fontSizePx: 28,
+        fontWeight: 600,
+        textColor: '#A7E46B',
+        backgroundOpacity: 0.64
+      }),
+      'utf8'
+    )
+
+    expect(await store.load()).toEqual({
+      schemaVersion: 2,
+      fontFamily: 'mono',
+      fontSizePx: 28,
+      fontWeight: 600,
+      textColor: '#A7E46B',
+      backgroundOpacity: 0.64,
+      speedMultiplier: 1
+    })
+  })
+
   it('连续保存按提交顺序串行化并保留最终值', async () => {
     const { store, path } = await makeStore()
 
     await Promise.all([
-      store.save({ ...DEFAULT_OVERLAY_STYLE, fontSizePx: 18 }),
-      store.save({ ...DEFAULT_OVERLAY_STYLE, fontSizePx: 28 }),
-      store.save({ ...DEFAULT_OVERLAY_STYLE, fontSizePx: 38 })
+      store.save({ ...DEFAULT_OVERLAY_STYLE, fontSizePx: 18, speedMultiplier: 0.5 }),
+      store.save({ ...DEFAULT_OVERLAY_STYLE, fontSizePx: 28, speedMultiplier: 1.2 }),
+      store.save({ ...DEFAULT_OVERLAY_STYLE, fontSizePx: 38, speedMultiplier: 2 })
     ])
 
-    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ fontSizePx: 38 })
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+      schemaVersion: 2,
+      fontSizePx: 38,
+      speedMultiplier: 2
+    })
   })
 })

@@ -2,22 +2,29 @@ export type OverlayFontFamily = 'sans' | 'cjk' | 'mono'
 export type OverlayFontWeight = 400 | 500 | 600
 
 export interface OverlayStyleSettings {
-  schemaVersion: 1
+  schemaVersion: 2
   fontFamily: OverlayFontFamily
   fontSizePx: number
   fontWeight: OverlayFontWeight
   textColor: string
   backgroundOpacity: number
+  speedMultiplier: number
 }
 
 export const DEFAULT_OVERLAY_STYLE: Readonly<OverlayStyleSettings> = Object.freeze({
-  schemaVersion: 1,
+  schemaVersion: 2,
   fontFamily: 'sans',
   fontSizePx: 22,
   fontWeight: 500,
   textColor: '#F4F8F5',
-  backgroundOpacity: 0.88
+  backgroundOpacity: 0.88,
+  speedMultiplier: 1
 })
+
+export const MIN_OVERLAY_SPEED = 0.5
+export const MAX_OVERLAY_SPEED = 2
+export const OVERLAY_SPEED_STEP = 0.1
+export const FALLBACK_DANMAKU_DURATION_MS = 7200
 
 export const OVERLAY_FONT_STACKS: Record<OverlayFontFamily, string> = {
   sans: "'IBM Plex Sans', 'Noto Sans SC', sans-serif",
@@ -38,9 +45,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export function parseOverlayStyleSettings(value: unknown): OverlayStyleSettings {
-  if (!isRecord(value)) throw new Error('弹幕样式必须是对象')
-  if (value.schemaVersion !== 1) throw new Error('不支持的弹幕样式版本')
+function parseOverlayStyleFields(
+  value: Record<string, unknown>,
+  speedMultiplier: unknown
+): OverlayStyleSettings {
   if (!['sans', 'cjk', 'mono'].includes(String(value.fontFamily))) {
     throw new Error('弹幕字体不在允许列表中')
   }
@@ -60,15 +68,56 @@ export function parseOverlayStyleSettings(value: unknown): OverlayStyleSettings 
   ) {
     throw new Error('背景不透明度必须在 0–1 之间')
   }
+  if (
+    typeof speedMultiplier !== 'number' ||
+    !Number.isFinite(speedMultiplier) ||
+    speedMultiplier < MIN_OVERLAY_SPEED ||
+    speedMultiplier > MAX_OVERLAY_SPEED ||
+    Math.abs(speedMultiplier / OVERLAY_SPEED_STEP - Math.round(speedMultiplier / OVERLAY_SPEED_STEP)) >
+      Number.EPSILON * 10
+  ) {
+    throw new Error('弹幕速度必须是 0.5–2.0 之间且步进为 0.1 的数值')
+  }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     fontFamily: value.fontFamily as OverlayFontFamily,
     fontSizePx: Number(value.fontSizePx),
     fontWeight: Number(value.fontWeight) as OverlayFontWeight,
     textColor,
-    backgroundOpacity: value.backgroundOpacity
+    backgroundOpacity: value.backgroundOpacity,
+    speedMultiplier
   }
+}
+
+export function parseOverlayStyleSettings(value: unknown): OverlayStyleSettings {
+  if (!isRecord(value)) throw new Error('弹幕样式必须是对象')
+  if (value.schemaVersion !== 2) throw new Error('不支持的弹幕样式版本')
+  return parseOverlayStyleFields(value, value.speedMultiplier)
+}
+
+export function migrateOverlayStyleSettings(value: unknown): OverlayStyleSettings {
+  if (!isRecord(value)) throw new Error('弹幕样式必须是对象')
+  if (value.schemaVersion === 1) return parseOverlayStyleFields(value, 1)
+  return parseOverlayStyleSettings(value)
+}
+
+export function effectiveDanmakuDuration(
+  baseDuration: unknown,
+  speedMultiplier: number
+): number {
+  const parsedDuration = Number(baseDuration)
+  const duration =
+    Number.isFinite(parsedDuration) && parsedDuration > 0
+      ? parsedDuration
+      : FALLBACK_DANMAKU_DURATION_MS
+  const speed =
+    Number.isFinite(speedMultiplier) &&
+    speedMultiplier >= MIN_OVERLAY_SPEED &&
+    speedMultiplier <= MAX_OVERLAY_SPEED
+      ? speedMultiplier
+      : 1
+  return Math.round(duration / speed)
 }
 
 export function cloneDefaultOverlayStyle(): OverlayStyleSettings {

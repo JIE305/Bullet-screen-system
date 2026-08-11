@@ -1,4 +1,11 @@
 import type { OverlayStyleSettings } from './overlay-style'
+import type { CaptureStartOptions, PreprocessMode, RoiSettings, RuleSettings, SavedCaptureSettings } from './capture-settings'
+import type {
+  CloudApiPublicSettings,
+  CloudApiRuntimeState,
+  CloudApiSettingsUpdate,
+  CloudApiTestResult
+} from './cloud-api'
 
 export type BackendStatus = 'starting' | 'online' | 'offline' | 'error'
 export type SessionStatus = 'idle' | 'starting' | 'running' | 'stopping' | 'error'
@@ -40,6 +47,8 @@ export interface EventEnvelope {
 export interface CaptureRuntime {
   sessionId: string
   regionId: string
+  region: RoiSettings
+  preprocessMode: PreprocessMode
 }
 
 export interface FrameUpload {
@@ -63,7 +72,13 @@ export interface DaMuApi {
   getState(): Promise<AppState>
   listSources(): Promise<CaptureSourceInfo[]>
   startDemo(): Promise<void>
-  startSource(sourceId: string): Promise<void>
+  startSource(options: CaptureStartOptions): Promise<void>
+  getCaptureSettings(sourceId: string): Promise<SavedCaptureSettings | null>
+  getGlobalRules(): Promise<RuleSettings[]>
+  updateGlobalRules(rules: RuleSettings[]): Promise<RuleSettings[]>
+  getCloudApiSettings(): Promise<CloudApiPublicSettings>
+  saveCloudApiSettings(input: CloudApiSettingsUpdate): Promise<CloudApiPublicSettings>
+  testCloudApi(): Promise<CloudApiTestResult>
   stopSession(): Promise<void>
   sendOverlayTest(): Promise<void>
   copyText(text: string): Promise<void>
@@ -76,4 +91,5 @@ export interface DaMuApi {
   onEvent(callback: (event: EventEnvelope) => void): () => void
   onOverlayReset(callback: () => void): () => void
   onOverlayStyle(callback: (settings: OverlayStyleSettings) => void): () => void
+  onCloudApiState(callback: (state: CloudApiRuntimeState) => void): () => void
 }

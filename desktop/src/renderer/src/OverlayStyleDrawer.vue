@@ -3,6 +3,10 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { damuApi } from './api'
 import {
   cloneDefaultOverlayStyle,
+  effectiveDanmakuDuration,
+  MAX_OVERLAY_SPEED,
+  MIN_OVERLAY_SPEED,
+  OVERLAY_SPEED_STEP,
   overlayStyleVariables,
   parseOverlayStyleSettings,
   type OverlayFontFamily,
@@ -20,8 +24,12 @@ const colorInput = ref(draft.value.textColor)
 const initialized = ref(false)
 const saveStatus = ref<'loading' | 'saved' | 'saving' | 'error'>('loading')
 const saveError = ref('')
-const previewStyle = computed(() => overlayStyleVariables(draft.value))
+const previewStyle = computed<Record<string, string>>(() => ({
+  ...overlayStyleVariables(draft.value),
+  '--danmaku-preview-duration': `${effectiveDanmakuDuration(7000, draft.value.speedMultiplier)}ms`
+}))
 const opacityPercent = computed(() => Math.round(draft.value.backgroundOpacity * 100))
+const speedLabel = computed(() => draft.value.speedMultiplier.toFixed(1))
 let saveTimer: number | undefined
 let revision = 0
 let disposeStyle: (() => void) | undefined
@@ -84,6 +92,15 @@ function setFontWeight(fontWeight: OverlayFontWeight): void {
 
 function setOpacity(value: string): void {
   updateDraft({ backgroundOpacity: Number(value) / 100 })
+}
+
+function setSpeed(value: string): void {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return
+  const rounded = Math.round(parsed / OVERLAY_SPEED_STEP) * OVERLAY_SPEED_STEP
+  updateDraft({
+    speedMultiplier: Math.min(MAX_OVERLAY_SPEED, Math.max(MIN_OVERLAY_SPEED, rounded))
+  })
 }
 
 function setColor(value: string): void {
@@ -184,7 +201,12 @@ onUnmounted(() => {
 
           <section class="style-preview" :style="previewStyle" aria-label="弹幕样式预览">
             <span class="preview-grid" aria-hidden="true"></span>
-            <div class="preview-message"><i></i>游戏事件已识别 · 弹幕样式预览</div>
+            <div
+              :key="speedLabel"
+              class="preview-message"
+              data-testid="style-preview-message"
+              :data-speed-multiplier="speedLabel"
+            ><i></i>游戏事件已识别 · 弹幕样式预览</div>
           </section>
 
           <div class="save-readout" :class="saveStatus" aria-live="polite">
@@ -299,6 +321,28 @@ onUnmounted(() => {
                 <output>{{ opacityPercent }}%</output>
               </div>
             </fieldset>
+
+            <fieldset class="style-field">
+              <legend><b>弹幕速度</b><small>新弹幕 · {{ speedLabel }}×</small></legend>
+              <div class="range-row speed-row">
+                <input
+                  type="range"
+                  :min="MIN_OVERLAY_SPEED"
+                  :max="MAX_OVERLAY_SPEED"
+                  :step="OVERLAY_SPEED_STEP"
+                  :value="draft.speedMultiplier"
+                  aria-label="弹幕速度倍率"
+                  data-testid="overlay-speed-input"
+                  @input="setSpeed(($event.target as HTMLInputElement).value)"
+                />
+                <output>{{ speedLabel }}×</output>
+                <div class="speed-scale" aria-hidden="true">
+                  <span>0.5× 慢速</span>
+                  <span>1.0× 标准</span>
+                  <span>2.0× 快速</span>
+                </div>
+              </div>
+            </fieldset>
           </form>
 
           <footer class="drawer-footer">
@@ -325,7 +369,7 @@ onUnmounted(() => {
 .drawer-close:focus-visible, .reset-button:focus-visible, .style-form input:focus-visible, .style-form select:focus-visible, .style-form button:focus-visible { outline: 2px solid #a7e46b; outline-offset: 2px; }
 .style-preview { position: relative; flex: 0 0 130px; margin: 20px 24px 12px; overflow: hidden; border: 1px solid #354139; border-radius: 6px; background: #172019; font-family: var(--danmaku-font-family); }
 .preview-grid { position: absolute; inset: 0; opacity: .18; background-image: linear-gradient(#526058 1px, transparent 1px), linear-gradient(90deg, #526058 1px, transparent 1px); background-size: 24px 24px; }
-.preview-message { --danmaku-tone: #a7e46b; position: absolute; top: 44px; left: 100%; display: flex; align-items: center; gap: 8px; width: max-content; max-width: 92%; padding: 9px 12px 9px 9px; overflow: hidden; color: var(--danmaku-text-color); border: 1px solid color-mix(in srgb, var(--danmaku-tone) 46%, rgba(233, 239, 234, .56)); border-radius: 6px; background: var(--danmaku-background); font-family: var(--danmaku-font-family); font-size: var(--danmaku-font-size); font-weight: var(--danmaku-font-weight); line-height: 1.2; white-space: nowrap; text-overflow: ellipsis; text-shadow: 0 1px 4px rgba(0, 0, 0, .85); animation: preview-travel 7s linear infinite; }
+.preview-message { --danmaku-tone: #a7e46b; position: absolute; top: 44px; left: 100%; display: flex; align-items: center; gap: 8px; width: max-content; max-width: 92%; padding: 9px 12px 9px 9px; overflow: hidden; color: var(--danmaku-text-color); border: 1px solid color-mix(in srgb, var(--danmaku-tone) 46%, rgba(233, 239, 234, .56)); border-radius: 6px; background: var(--danmaku-background); font-family: var(--danmaku-font-family); font-size: var(--danmaku-font-size); font-weight: var(--danmaku-font-weight); line-height: 1.2; white-space: nowrap; text-overflow: ellipsis; text-shadow: 0 1px 4px rgba(0, 0, 0, .85); animation: preview-travel var(--danmaku-preview-duration, 7000ms) linear infinite; }
 .preview-message i { width: 4px; height: 18px; flex: 0 0 auto; border-radius: 1px; background: var(--danmaku-tone); }
 @keyframes preview-travel { from { transform: translateX(0); } to { transform: translateX(calc(-100% - 404px)); } }
 .save-readout { min-height: 30px; display: flex; align-items: center; gap: 8px; margin: 0 24px; color: #87938b; font: 500 9px 'JetBrains Mono', monospace; letter-spacing: .05em; }
@@ -350,7 +394,10 @@ input[type='range'] { width: 100%; accent-color: #a7e46b; }
 .color-input-row { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; margin-top: 8px; }
 .native-color { width: 44px; height: 38px; padding: 4px; border: 1px solid #526058; border-radius: 6px; background: #171d19; cursor: pointer; }
 .field-error { display: block; margin-top: 7px; color: #db6b63 !important; }
-.opacity-row output { color: #e9efea; text-align: right; font: 500 11px 'JetBrains Mono', monospace; }
+.opacity-row output, .speed-row output { color: #e9efea; text-align: right; font: 500 11px 'JetBrains Mono', monospace; }
+.speed-row { grid-template-areas: 'slider output' 'scale empty'; row-gap: 7px; }
+.speed-row > input { grid-area: slider; margin: 0; }.speed-row > output { grid-area: output; }.speed-scale { grid-area: scale; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); color: #87938b; font: 400 9px 'JetBrains Mono', monospace; line-height: 1.5; }
+.speed-scale span:first-child { text-align: left; }.speed-scale span:nth-child(2) { text-align: center; }.speed-scale span:last-child { text-align: right; }
 .drawer-footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px 22px; border-top: 1px solid #354139; background: #0d110f; }
 .drawer-footer p { max-width: 190px; margin: 0; color: #87938b; font-size: 10px; line-height: 1.5; text-wrap: pretty; }
 .reset-button { color: #e7b75f; white-space: nowrap; }

@@ -4,6 +4,7 @@ import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Callable
 from uuid import UUID
 
@@ -16,6 +17,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -24,6 +26,11 @@ from fastapi import (
 
 from . import __version__
 from .contracts import (
+    DanmakuRule,
+    GenerationConfig,
+    GenerationConfigState,
+    GenerationTestRequest,
+    GenerationTestResult,
     FrameReceipt,
     ProfileCreate,
     ProfilePatch,
@@ -33,7 +40,10 @@ from .contracts import (
     WindowBounds,
     utc_now,
 )
-from .runtime import DummyRecognizer, EventHub, FrameItem, SessionManager
+from .recognition import DummyRecognizer, Recognizer
+from .database import EventWriter, Repository
+from .runtime import EventHub, FrameItem, SessionManager
+from .generation import GenerationFailure, GenerationService
 from .windows import get_window_bounds
 
 MAX_IMAGE_BYTES = 1024 * 1024
@@ -44,16 +54,36 @@ def create_app(
     token: str,
     shutdown_callback: Callable[[], None] | None = None,
     window_bounds_reader: Callable[[int], WindowBounds | None] = get_window_bounds,
+    recognizer: Recognizer | None = None,
+    data_dir: Path | None = None,
+    generation_service: GenerationService | None = None,
 ) -> FastAPI:
-    hub = EventHub()
-    recognizer = DummyRecognizer()
-    sessions = SessionManager(hub, recognizer)
+    repository = Repository(data_dir / "damusystem.sqlite3") if data_dir else None
+    writer = EventWriter(repository) if repository else None
+    hub = EventHub(writer.enqueue if writer else None)
+    active_recognizer = recognizer or DummyRecognizer()
+    generation = generation_service or GenerationService()
+    sessions = SessionManager(
+        hub,
+        active_recognizer,
+        repository.save_session if repository else None,
+        generation.create_generator,
+    )
     profiles: dict[UUID, ProfileRecord] = {}
+    global_rules: list[DanmakuRule] = []
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
-        await sessions.close_all()
+        if writer:
+            writer.start()
+        try:
+            yield
+        finally:
+            await sessions.close_all()
+            if writer:
+                await writer.stop()
+            if repository:
+                repository.close()
 
     app = FastAPI(
         title="DaMuSystem Local Backend",
@@ -65,6 +95,10 @@ def create_app(
     app.state.event_hub = hub
     app.state.session_manager = sessions
     app.state.profiles = profiles
+    app.state.global_rules = global_rules
+    app.state.repository = repository
+    app.state.event_writer = writer
+    app.state.generation_service = generation
 
     async def require_token(
         supplied: Annotated[str | None, Header(alias="X-DaMu-Token")] = None,
@@ -75,13 +109,15 @@ def create_app(
     api = APIRouter(prefix="/api/v1", dependencies=[Depends(require_token)])
 
     @api.get("/health")
-    async def health() -> dict[str, str]:
+    async def health() -> dict[str, str | None]:
         return {
             "status": "ok",
             "api_version": "1",
             "app_version": __version__,
-            "recognizer": recognizer.name,
-            "storage": "memory",
+            "recognizer": active_recognizer.name,
+            "storage": "sqlite" if repository else "memory",
+            "database": "error" if writer and writer.last_error else "ok",
+            "database_error": writer.last_error if writer else None,
         }
 
     @api.get("/windows/{hwnd}/bounds", response_model=WindowBounds)
@@ -93,18 +129,22 @@ def create_app(
 
     @api.get("/profiles", response_model=list[ProfileRecord])
     async def list_profiles() -> list[ProfileRecord]:
+        if repository:
+            return await asyncio.to_thread(repository.list_profiles)
         return list(profiles.values())
 
     @api.post(
         "/profiles", response_model=ProfileRecord, status_code=status.HTTP_201_CREATED
     )
     async def create_profile(payload: ProfileCreate) -> ProfileRecord:
+        if repository:
+            return await asyncio.to_thread(repository.create_profile, payload)
         profile = ProfileRecord(**payload.model_dump())
         profiles[profile.id] = profile
         return profile
 
     def find_profile(profile_id: UUID) -> ProfileRecord:
-        profile = profiles.get(profile_id)
+        profile = repository.get_profile(profile_id) if repository else profiles.get(profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="profile_not_found")
         return profile
@@ -117,6 +157,11 @@ def create_app(
     async def patch_profile(
         profile_id: UUID, payload: ProfilePatch
     ) -> ProfileRecord:
+        if repository:
+            updated = await asyncio.to_thread(repository.patch_profile, profile_id, payload)
+            if updated is None:
+                raise HTTPException(status_code=404, detail="profile_not_found")
+            return updated
         profile = find_profile(profile_id)
         changes = payload.model_dump(exclude_unset=True)
         updated = profile.model_copy(update={**changes, "updated_at": utc_now()})
@@ -125,19 +170,63 @@ def create_app(
 
     @api.delete("/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_profile(profile_id: UUID) -> None:
+        if repository:
+            deleted = await asyncio.to_thread(repository.delete_profile, profile_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="profile_not_found")
+            return
         find_profile(profile_id)
         del profiles[profile_id]
+
+    @api.get("/rules/global", response_model=list[DanmakuRule])
+    async def list_global_rules() -> list[DanmakuRule]:
+        if repository:
+            return await asyncio.to_thread(repository.list_global_rules)
+        return list(global_rules)
+
+    @api.put("/rules/global", response_model=list[DanmakuRule])
+    async def replace_global_rules(payload: list[DanmakuRule]) -> list[DanmakuRule]:
+        if repository:
+            return await asyncio.to_thread(repository.replace_global_rules, payload)
+        global_rules[:] = payload
+        return list(global_rules)
+
+    @api.put("/generation/config", response_model=GenerationConfigState)
+    async def configure_generation(payload: GenerationConfig) -> GenerationConfigState:
+        generation.configure(payload)
+        return GenerationConfigState(
+            enabled=payload.enabled,
+            configured=generation.configured,
+            model=payload.model,
+        )
+
+    @api.post("/generation/test", response_model=GenerationTestResult)
+    async def test_generation(payload: GenerationTestRequest) -> GenerationTestResult:
+        try:
+            return await generation.test(payload.text, payload.local_text)
+        except GenerationFailure as exc:
+            raise HTTPException(status_code=502, detail=exc.reason) from exc
 
     @api.post(
         "/sessions", response_model=SessionRecord, status_code=status.HTTP_201_CREATED
     )
     async def start_session(payload: SessionCreate) -> SessionRecord:
-        find_profile(payload.profile_id)
-        return await sessions.start(payload)
+        profile = find_profile(payload.profile_id)
+        selected_rules: list[DanmakuRule] | None = None
+        if payload.rule_scope == "global":
+            selected_rules = (
+                await asyncio.to_thread(repository.list_global_rules)
+                if repository
+                else list(global_rules)
+            )
+        return await sessions.start(payload, profile, selected_rules)
 
     @api.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-    async def stop_session(session_id: UUID) -> None:
-        if not await sessions.stop(session_id):
+    async def stop_session(
+        session_id: UUID,
+        reason: Annotated[str, Query(min_length=1, max_length=80)] = "user_requested",
+    ) -> None:
+        if not await sessions.stop(session_id, reason):
             raise HTTPException(status_code=404, detail="session_not_found")
 
     @api.post(
@@ -161,6 +250,8 @@ def create_app(
         content = await image.read(MAX_IMAGE_BYTES + 1)
         if len(content) > MAX_IMAGE_BYTES:
             raise HTTPException(status_code=413, detail="frame_too_large")
+        if len(content) < 4 or not content.startswith(b"\xff\xd8") or not content.endswith(b"\xff\xd9"):
+            raise HTTPException(status_code=422, detail="invalid_jpeg")
         timestamp = (
             captured_at.replace(tzinfo=UTC)
             if captured_at.tzinfo is None
@@ -170,6 +261,10 @@ def create_app(
             return FrameReceipt(
                 accepted=False, frame_id=frame_id, reason="frame_expired"
             )
+        profile = find_profile(sessions.get(session_id).record.profile_id)
+        region = next((item for item in profile.regions if item.id == region_id), None)
+        if region is None or not region.enabled:
+            raise HTTPException(status_code=422, detail="region_unavailable")
         dropped = sessions.enqueue(
             session_id,
             FrameItem(
@@ -179,6 +274,7 @@ def create_app(
                 width=width,
                 height=height,
                 image=content,
+                preprocess_mode=region.preprocess_mode,
             ),
         )
         return FrameReceipt(

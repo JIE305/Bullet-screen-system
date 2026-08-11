@@ -3,7 +3,13 @@ src/damusystem_backend/__init__.py
 src/damusystem_backend/__main__.py
 src/damusystem_backend/app.py
 src/damusystem_backend/contracts.py
+src/damusystem_backend/database.py
+src/damusystem_backend/generation.py
+src/damusystem_backend/migrations.py
+src/damusystem_backend/recognition.py
+src/damusystem_backend/rules.py
 src/damusystem_backend/runtime.py
+src/damusystem_backend/windows.py
 src/damusystem_backend.egg-info/PKG-INFO
 src/damusystem_backend.egg-info/SOURCES.txt
 src/damusystem_backend.egg-info/dependency_links.txt
@@ -11,3 +17,7 @@ src/damusystem_backend.egg-info/entry_points.txt
 src/damusystem_backend.egg-info/requires.txt
 src/damusystem_backend.egg-info/top_level.txt
 tests/test_app.py
+tests/test_database.py
+tests/test_generation.py
+tests/test_recognition.py
+tests/test_rules.py

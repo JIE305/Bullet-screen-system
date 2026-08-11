@@ -38,12 +38,26 @@ async function captureOnce(runtime: CaptureRuntime): Promise<void> {
   const sourceWidth = video.videoWidth
   const sourceHeight = video.videoHeight
   if (!sourceWidth || !sourceHeight) return
-  const scale = Math.min(1, 1280 / Math.max(sourceWidth, sourceHeight))
-  canvas.width = Math.max(1, Math.round(sourceWidth * scale))
-  canvas.height = Math.max(1, Math.round(sourceHeight * scale))
+  const sourceX = Math.round(sourceWidth * runtime.region.x)
+  const sourceY = Math.round(sourceHeight * runtime.region.y)
+  const cropWidth = Math.max(1, Math.round(sourceWidth * runtime.region.width))
+  const cropHeight = Math.max(1, Math.round(sourceHeight * runtime.region.height))
+  const scale = Math.min(1, 1280 / Math.max(cropWidth, cropHeight))
+  canvas.width = Math.max(1, Math.round(cropWidth * scale))
+  canvas.height = Math.max(1, Math.round(cropHeight * scale))
   const context = canvas.getContext('2d', { alpha: false })
   if (!context) throw new Error('无法创建 Canvas 上下文')
-  context.drawImage(video, 0, 0, canvas.width, canvas.height)
+  context.drawImage(
+    video,
+    sourceX,
+    sourceY,
+    cropWidth,
+    cropHeight,
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  )
   const blob = await canvasBlob()
   if (blob.size > 1024 * 1024) throw new Error('测试帧超过 1 MiB')
   await api.uploadFrame({

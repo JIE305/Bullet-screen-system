@@ -198,6 +198,13 @@ export class BackendClient extends EventEmitter {
     })
   }
 
+  crashForTest(): void {
+    if (process.env.DAMU_AUTOMATED_DEMO !== '1' || !this.child) {
+      throw new Error('后端崩溃测试只能在自动冒烟模式运行')
+    }
+    this.child.kill()
+  }
+
   async stop(): Promise<void> {
     if (!this.child) return
     this.stopping = true
@@ -216,4 +223,3 @@ export class BackendClient extends EventEmitter {
     this.baseUrl = null
   }
 }
-

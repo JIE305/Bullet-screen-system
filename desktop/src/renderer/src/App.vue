@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { damuApi, isBrowserPreview } from './api'
 import type { AppState, CaptureSourceInfo, EventEnvelope } from '../../shared/contracts'
 import {
+  DEFAULT_ROI,
+  createRuleSettings,
+  type PreprocessMode,
+  type RoiSettings,
+  type RuleSettings
+} from '../../shared/capture-settings'
+import {
+  DEFAULT_EVENT_LOG_FILTER,
   clearEvents,
   filterEvents,
   getEventSummary,
@@ -11,6 +19,13 @@ import {
   type EventLogFilter
 } from '../../shared/event-log'
 import OverlayStyleDrawer from './OverlayStyleDrawer.vue'
+import CloudApiDrawer from './CloudApiDrawer.vue'
+import {
+  cloneDefaultCloudApiSettings,
+  type CloudApiPublicSettings,
+  type CloudApiRuntimeState,
+  type CloudApiTestResult
+} from '../../shared/cloud-api'
 
 const state = ref<AppState>({
   backend: 'starting',
@@ -21,17 +36,40 @@ const state = ref<AppState>({
 })
 const sources = ref<CaptureSourceInfo[]>([])
 const selectedSourceId = ref('')
+const roi = ref<RoiSettings>({ ...DEFAULT_ROI })
+const preprocessMode = ref<PreprocessMode>('original')
+const globalRules = ref<RuleSettings[]>([])
+const savedGlobalRules = ref<RuleSettings[]>([])
 const busy = ref(false)
 const loadingSources = ref(false)
 const localError = ref('')
 const eventLog = ref<EventEnvelope[]>([])
-const eventFilter = ref<EventLogFilter>('all')
+// The primary view mirrors what is actually sent to the overlay. Diagnostic
+// recognition/status events remain available through the "全部" filter.
+const eventFilter = ref<EventLogFilter>(DEFAULT_EVENT_LOG_FILTER)
 const copyStatus = ref('')
 const styleDrawerOpen = ref(false)
 const styleTrigger = ref<HTMLButtonElement>()
+const cloudDrawerOpen = ref(false)
+const cloudTrigger = ref<HTMLButtonElement>()
+const cloudSettings = ref(cloneDefaultCloudApiSettings())
+const cloudState = ref<CloudApiRuntimeState>({ status: 'unconfigured' })
 let disposeState: (() => void) | undefined
 let disposeEvents: (() => void) | undefined
+let disposeCloudState: (() => void) | undefined
 let copyStatusTimer: number | undefined
+let roiPointerId: number | undefined
+let roiStart: { x: number; y: number } | undefined
+
+const selectedSource = computed(() =>
+  sources.value.find((source) => source.id === selectedSourceId.value)
+)
+const roiStyle = computed(() => ({
+  left: `${roi.value.x * 100}%`,
+  top: `${roi.value.y * 100}%`,
+  width: `${roi.value.width * 100}%`,
+  height: `${roi.value.height * 100}%`
+}))
 
 const filteredEvents = computed(() => filterEvents(eventLog.value, eventFilter.value))
 const clearEventLabel = computed(() =>
@@ -68,6 +106,39 @@ const sessionLabel = computed(() => {
 const canStart = computed(
   () => state.value.backend === 'online' && state.value.session === 'idle' && !busy.value
 )
+const cloudStatusLabel = computed(() => ({
+  unconfigured: '未配置',
+  disabled: '已停用',
+  ready: '就绪',
+  calling: '调用中',
+  rate_limited: '已限流',
+  error: '失败'
+})[cloudState.value.status])
+const canEnableCloud = computed(() =>
+  Boolean(cloudSettings.value.hasApiKey && cloudSettings.value.baseUrl && cloudSettings.value.model)
+)
+const rulesDirty = computed(
+  () => JSON.stringify(globalRules.value) !== JSON.stringify(savedGlobalRules.value)
+)
+const ruleNotice = computed(() => {
+  if (globalRules.value.length === 0) return '仅识别模式：尚未配置全局关键词，OCR 结果不会生成弹幕。'
+  const enabled = globalRules.value.filter((item) => item.enabled).length
+  return `已配置 ${globalRules.value.length} 条全局规则，其中 ${enabled} 条启用；所有真实窗口共享。`
+})
+
+watch(selectedSourceId, async (sourceId) => {
+  if (!sourceId || state.value.session !== 'idle') return
+  roi.value = { ...DEFAULT_ROI }
+  preprocessMode.value = 'original'
+  try {
+    const saved = await damuApi.getCaptureSettings(sourceId)
+    if (!saved || selectedSourceId.value !== sourceId) return
+    roi.value = { ...saved.region }
+    preprocessMode.value = saved.preprocessMode
+  } catch (error) {
+    localError.value = error instanceof Error ? error.message : String(error)
+  }
+})
 
 async function run(action: () => Promise<void>): Promise<void> {
   busy.value = true
@@ -102,6 +173,93 @@ function formatTime(value: string): string {
     minute: '2-digit',
     second: '2-digit'
   }).format(new Date(value))
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value))
+}
+
+function normalizeRoi(): void {
+  const x = clamp(Number(roi.value.x) || 0, 0, 0.98)
+  const y = clamp(Number(roi.value.y) || 0, 0, 0.98)
+  roi.value = {
+    x,
+    y,
+    width: clamp(Number(roi.value.width) || 0.02, 0.02, 1 - x),
+    height: clamp(Number(roi.value.height) || 0.02, 0.02, 1 - y)
+  }
+}
+
+function roiPoint(event: PointerEvent): { x: number; y: number } {
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  return {
+    x: clamp((event.clientX - bounds.left) / bounds.width, 0, 1),
+    y: clamp((event.clientY - bounds.top) / bounds.height, 0, 1)
+  }
+}
+
+function beginRoi(event: PointerEvent): void {
+  if (state.value.session !== 'idle') return
+  roiPointerId = event.pointerId
+  roiStart = roiPoint(event)
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  roi.value = { x: roiStart.x, y: roiStart.y, width: 0.02, height: 0.02 }
+}
+
+function updateRoi(event: PointerEvent): void {
+  if (event.pointerId !== roiPointerId || !roiStart) return
+  const point = roiPoint(event)
+  const x = Math.min(roiStart.x, point.x)
+  const y = Math.min(roiStart.y, point.y)
+  roi.value = {
+    x,
+    y,
+    width: Math.max(0.02, Math.abs(point.x - roiStart.x)),
+    height: Math.max(0.02, Math.abs(point.y - roiStart.y))
+  }
+  normalizeRoi()
+}
+
+function endRoi(event: PointerEvent): void {
+  if (event.pointerId !== roiPointerId) return
+  updateRoi(event)
+  roiPointerId = undefined
+  roiStart = undefined
+}
+
+function cloneRules(rules: RuleSettings[]): RuleSettings[] {
+  return rules.map((item) => ({ ...item }))
+}
+
+async function loadGlobalRules(): Promise<void> {
+  const loaded = await damuApi.getGlobalRules()
+  globalRules.value = cloneRules(loaded)
+  savedGlobalRules.value = cloneRules(loaded)
+}
+
+function addGlobalRule(): void {
+  globalRules.value.push(createRuleSettings())
+}
+
+function removeGlobalRule(index: number): void {
+  globalRules.value.splice(index, 1)
+}
+
+async function saveGlobalRules(): Promise<void> {
+  if (state.value.session !== 'idle') throw new Error('请先停止当前会话，再保存全局规则')
+  const saved = await damuApi.updateGlobalRules(cloneRules(globalRules.value))
+  globalRules.value = cloneRules(saved)
+  savedGlobalRules.value = cloneRules(saved)
+}
+
+async function startSelectedSource(): Promise<void> {
+  normalizeRoi()
+  await saveGlobalRules()
+  await damuApi.startSource({
+    sourceId: selectedSourceId.value,
+    region: { ...roi.value },
+    preprocessMode: preprocessMode.value
+  })
 }
 
 function setEventFilter(filter: EventLogFilter): void {
@@ -142,6 +300,50 @@ async function closeStyleDrawer(): Promise<void> {
   styleTrigger.value?.focus()
 }
 
+function openCloudDrawer(): void {
+  cloudDrawerOpen.value = true
+}
+
+async function closeCloudDrawer(): Promise<void> {
+  cloudDrawerOpen.value = false
+  await nextTick()
+  cloudTrigger.value?.focus()
+}
+
+function applyCloudSettings(settings: CloudApiPublicSettings): void {
+  cloudSettings.value = { ...settings }
+}
+
+function applyCloudTest(result: CloudApiTestResult): void {
+  cloudState.value = {
+    status: cloudSettings.value.enabled ? 'ready' : 'disabled',
+    model: result.model,
+    lastLatencyMs: result.elapsedMs,
+    lastResult: result.text
+  }
+}
+
+async function toggleCloudEnabled(): Promise<void> {
+  if (!cloudSettings.value.enabled && !canEnableCloud.value) {
+    openCloudDrawer()
+    return
+  }
+  const saved = await damuApi.saveCloudApiSettings({
+    enabled: !cloudSettings.value.enabled,
+    baseUrl: cloudSettings.value.baseUrl,
+    model: cloudSettings.value.model,
+    systemPrompt: cloudSettings.value.systemPrompt,
+    timeoutMs: cloudSettings.value.timeoutMs,
+    maxCallsPerMinute: cloudSettings.value.maxCallsPerMinute
+  })
+  applyCloudSettings(saved)
+}
+
+async function testCloudFromRail(): Promise<void> {
+  const result = await damuApi.testCloudApi()
+  applyCloudTest(result)
+}
+
 onMounted(async () => {
   state.value = await damuApi.getState()
   disposeState = damuApi.onState((next) => {
@@ -150,12 +352,25 @@ onMounted(async () => {
   disposeEvents = damuApi.onEvent((event) => {
     eventLog.value = prependEvent(eventLog.value, event)
   })
-  await refreshSources()
+  disposeCloudState = damuApi.onCloudApiState((next) => {
+    cloudState.value = next
+  })
+  try {
+    const [, , cloud] = await Promise.all([
+      refreshSources(),
+      loadGlobalRules(),
+      damuApi.getCloudApiSettings()
+    ])
+    applyCloudSettings(cloud)
+  } catch (error) {
+    localError.value = error instanceof Error ? error.message : String(error)
+  }
 })
 
 onUnmounted(() => {
   disposeState?.()
   disposeEvents?.()
+  disposeCloudState?.()
   if (copyStatusTimer !== undefined) window.clearTimeout(copyStatusTimer)
 })
 </script>
@@ -172,18 +387,42 @@ onUnmounted(() => {
       </div>
 
       <nav class="step-nav" aria-label="开发阶段">
-        <div class="step current">
+        <div class="step">
           <span>01</span>
-          <div><strong>通信链路</strong><small>WEEK 01 · ACTIVE</small></div>
+          <div><strong>通信链路</strong><small>WEEK 01 · COMPLETE</small></div>
         </div>
-        <div class="step"><span>02</span><div><strong>视觉识别</strong><small>OCR · LOCKED</small></div></div>
-        <div class="step"><span>03</span><div><strong>数据持久化</strong><small>SQLITE · LOCKED</small></div></div>
-        <div class="step"><span>04</span><div><strong>打包验收</strong><small>RELEASE · LOCKED</small></div></div>
+        <div class="step"><span>02</span><div><strong>视觉识别</strong><small>OCR · COMPLETE</small></div></div>
+        <div class="step"><span>03</span><div><strong>数据持久化</strong><small>SQLITE · COMPLETE</small></div></div>
+        <div class="step current"><span>04</span><div><strong>打包验收</strong><small>RELEASE · ACTIVE</small></div></div>
       </nav>
+
+      <section class="cloud-card" aria-labelledby="cloud-card-title">
+        <div class="cloud-card-head">
+          <span id="cloud-card-title">CLOUD GENERATOR</span>
+          <i :class="cloudState.status" aria-hidden="true"></i>
+        </div>
+        <strong>{{ cloudStatusLabel }}</strong>
+        <p :title="cloudSettings.model || '尚未配置模型'">{{ cloudSettings.model || 'NO MODEL CONFIGURED' }}</p>
+        <small v-if="cloudState.lastLatencyMs !== undefined">LAST · {{ Math.round(cloudState.lastLatencyMs) }} MS</small>
+        <small v-else>KEYWORD-GATED · TEXT ONLY</small>
+        <div class="cloud-card-actions">
+          <button
+            type="button"
+            :disabled="state.session !== 'idle' || busy"
+            @click="run(toggleCloudEnabled)"
+          >{{ cloudSettings.enabled ? '停用' : '启用' }}</button>
+          <button ref="cloudTrigger" data-testid="cloud-config-trigger" type="button" @click="openCloudDrawer">配置</button>
+          <button
+            type="button"
+            :disabled="state.session !== 'idle' || busy || !canEnableCloud"
+            @click="run(testCloudFromRail)"
+          >测试</button>
+        </div>
+      </section>
 
       <div class="rail-note">
         <span class="label">阶段边界</span>
-        <p>当前使用 DummyRecognizer 与内存配置，真实 OCR 和数据库尚未启用。</p>
+        <p>RapidOCR、单区域规则与 SQLite 已接入；安装包已生成，当前进入实际游戏与长时稳定性验收。</p>
       </div>
       <div v-if="isBrowserPreview" class="preview-flag">BROWSER PREVIEW</div>
     </aside>
@@ -195,7 +434,7 @@ onUnmounted(() => {
           <h1>捕获会话</h1>
         </div>
         <div class="topbar-actions">
-          <button ref="styleTrigger" class="style-trigger" type="button" @click="openStyleDrawer">弹幕样式</button>
+          <button ref="styleTrigger" class="style-trigger" type="button" data-testid="style-trigger" @click="openStyleDrawer">弹幕样式</button>
           <div class="status-cluster" aria-label="系统状态">
             <span class="status" :class="state.backend"><i></i>{{ backendLabel }}</span>
             <span class="status" :class="state.connection"><i></i>WS {{ state.connection === 'connected' ? '已连接' : '未连接' }}</span>
@@ -246,11 +485,67 @@ onUnmounted(() => {
             </button>
           </div>
 
+          <div class="capture-setup">
+            <section class="roi-config" aria-labelledby="roi-heading">
+              <div class="setup-heading">
+                <div><span class="label">02 / REGION</span><h3 id="roi-heading">识别区域</h3></div>
+                <span>拖拽重画</span>
+              </div>
+              <div
+                class="roi-canvas"
+                :class="{ disabled: state.session !== 'idle' }"
+                @pointerdown="beginRoi"
+                @pointermove="updateRoi"
+                @pointerup="endRoi"
+                @pointercancel="endRoi"
+              >
+                <img v-if="selectedSource?.thumbnail" :src="selectedSource.thumbnail" alt="所选窗口预览" draggable="false" />
+                <span v-else>WINDOW PREVIEW</span>
+                <i class="roi-selection" :style="roiStyle"><b>ROI</b></i>
+              </div>
+              <div class="roi-values">
+                <label v-for="key in (['x', 'y', 'width', 'height'] as const)" :key="key">
+                  <span>{{ key === 'width' ? 'W' : key === 'height' ? 'H' : key.toUpperCase() }}</span>
+                  <input v-model.number="roi[key]" type="number" min="0" max="1" step="0.01" :disabled="state.session !== 'idle'" @change="normalizeRoi" />
+                </label>
+              </div>
+            </section>
+
+            <section class="rule-config" aria-labelledby="rule-heading">
+              <div class="setup-heading">
+                <div><span class="label">03 / GLOBAL RULES</span><h3 id="rule-heading">全局弹幕规则</h3></div>
+                <button class="rule-add" type="button" :disabled="state.session !== 'idle'" @click="addGlobalRule">＋ 添加</button>
+              </div>
+              <label class="preprocess-field"><span>当前窗口预处理</span><select v-model="preprocessMode" :disabled="state.session !== 'idle'"><option value="original">原始画面</option><option value="high_contrast">高对比度</option></select></label>
+              <div v-if="globalRules.length" class="global-rule-list">
+                <article v-for="(item, index) in globalRules" :key="item.id || index" class="global-rule-card">
+                  <div class="global-rule-card-head">
+                    <strong>规则 {{ String(index + 1).padStart(2, '0') }}</strong>
+                    <label class="rule-enabled"><input v-model="item.enabled" type="checkbox" :disabled="state.session !== 'idle'" /><span>启用</span></label>
+                    <button type="button" :disabled="state.session !== 'idle'" @click="removeGlobalRule(index)">移除</button>
+                  </div>
+                  <div class="rule-fields">
+                    <label><span>匹配</span><select v-model="item.matchType" :disabled="state.session !== 'idle'"><option value="contains">包含</option><option value="exact">完全匹配</option></select></label>
+                    <label><span>关键词</span><input v-model="item.pattern" maxlength="200" :disabled="state.session !== 'idle'" /></label>
+                    <label class="wide"><span>弹幕模板</span><input v-model="item.template" maxlength="240" :disabled="state.session !== 'idle'" /></label>
+                    <label><span>置信度</span><input v-model.number="item.confidence" type="number" min="0" max="1" step="0.05" :disabled="state.session !== 'idle'" /></label>
+                    <label><span>冷却 ms</span><input v-model.number="item.cooldownMs" type="number" min="0" max="60000" step="500" :disabled="state.session !== 'idle'" /></label>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="global-rule-empty">尚无全局关键词。添加后，所有所选窗口都会使用同一套规则。</div>
+              <div class="rule-save-row">
+                <p class="rule-notice">{{ ruleNotice }}</p>
+                <button type="button" :disabled="state.session !== 'idle' || busy || !rulesDirty" @click="run(saveGlobalRules)">{{ rulesDirty ? '保存全局规则' : '规则已保存' }}</button>
+              </div>
+            </section>
+          </div>
+
           <div class="action-bar">
             <button
               class="primary-button"
               :disabled="!canStart || !selectedSourceId"
-              @click="run(() => damuApi.startSource(selectedSourceId))"
+              @click="run(startSelectedSource)"
             >
               启动所选窗口
             </button>
@@ -353,5 +648,13 @@ onUnmounted(() => {
       </section>
     </main>
     <OverlayStyleDrawer :open="styleDrawerOpen" @close="closeStyleDrawer" />
+    <CloudApiDrawer
+      :open="cloudDrawerOpen"
+      :settings="cloudSettings"
+      :session-active="state.session !== 'idle'"
+      @close="closeCloudDrawer"
+      @saved="applyCloudSettings"
+      @tested="applyCloudTest"
+    />
   </div>
 </template>
