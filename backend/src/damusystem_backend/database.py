@@ -34,6 +34,7 @@ class GameProfile(Base):
     __tablename__ = "game_profiles"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(80), index=True)
+    game_name: Mapped[str | None] = mapped_column(String(120))
     window_title_pattern: Mapped[str | None] = mapped_column(String(200))
     overlay_settings: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(40))
@@ -211,6 +212,7 @@ class Repository:
             if item is None:
                 return None
             item.name = updated.name
+            item.game_name = updated.game_name
             item.window_title_pattern = updated.window_title_pattern
             item.updated_at = updated.updated_at.isoformat()
             for index, region in enumerate(updated.regions):
@@ -320,6 +322,7 @@ class Repository:
         return GameProfile(
             id=str(record.id),
             name=record.name,
+            game_name=record.game_name,
             window_title_pattern=record.window_title_pattern,
             overlay_settings=None,
             created_at=record.created_at.isoformat(),
@@ -343,7 +346,8 @@ class Repository:
     @staticmethod
     def _profile_record(item: GameProfile) -> ProfileRecord:
         return ProfileRecord(
-            id=UUID(item.id), name=item.name, window_title_pattern=item.window_title_pattern,
+            id=UUID(item.id), name=item.name, game_name=item.game_name,
+            window_title_pattern=item.window_title_pattern,
             created_at=datetime.fromisoformat(item.created_at), updated_at=datetime.fromisoformat(item.updated_at),
             regions=[
                 RecognitionRegion(

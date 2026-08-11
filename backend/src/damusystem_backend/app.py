@@ -26,11 +26,8 @@ from fastapi import (
 
 from . import __version__
 from .contracts import (
-    DanmakuRule,
     GenerationConfig,
     GenerationConfigState,
-    GenerationTestRequest,
-    GenerationTestResult,
     FrameReceipt,
     ProfileCreate,
     ProfilePatch,
@@ -43,7 +40,7 @@ from .contracts import (
 from .recognition import DummyRecognizer, Recognizer
 from .database import EventWriter, Repository
 from .runtime import EventHub, FrameItem, SessionManager
-from .generation import GenerationFailure, GenerationService
+from .generation import GenerationService
 from .windows import get_window_bounds
 
 MAX_IMAGE_BYTES = 1024 * 1024
@@ -70,7 +67,6 @@ def create_app(
         generation.create_generator,
     )
     profiles: dict[UUID, ProfileRecord] = {}
-    global_rules: list[DanmakuRule] = []
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -95,7 +91,6 @@ def create_app(
     app.state.event_hub = hub
     app.state.session_manager = sessions
     app.state.profiles = profiles
-    app.state.global_rules = global_rules
     app.state.repository = repository
     app.state.event_writer = writer
     app.state.generation_service = generation
@@ -178,19 +173,6 @@ def create_app(
         find_profile(profile_id)
         del profiles[profile_id]
 
-    @api.get("/rules/global", response_model=list[DanmakuRule])
-    async def list_global_rules() -> list[DanmakuRule]:
-        if repository:
-            return await asyncio.to_thread(repository.list_global_rules)
-        return list(global_rules)
-
-    @api.put("/rules/global", response_model=list[DanmakuRule])
-    async def replace_global_rules(payload: list[DanmakuRule]) -> list[DanmakuRule]:
-        if repository:
-            return await asyncio.to_thread(repository.replace_global_rules, payload)
-        global_rules[:] = payload
-        return list(global_rules)
-
     @api.put("/generation/config", response_model=GenerationConfigState)
     async def configure_generation(payload: GenerationConfig) -> GenerationConfigState:
         generation.configure(payload)
@@ -200,26 +182,12 @@ def create_app(
             model=payload.model,
         )
 
-    @api.post("/generation/test", response_model=GenerationTestResult)
-    async def test_generation(payload: GenerationTestRequest) -> GenerationTestResult:
-        try:
-            return await generation.test(payload.text, payload.local_text)
-        except GenerationFailure as exc:
-            raise HTTPException(status_code=502, detail=exc.reason) from exc
-
     @api.post(
         "/sessions", response_model=SessionRecord, status_code=status.HTTP_201_CREATED
     )
     async def start_session(payload: SessionCreate) -> SessionRecord:
         profile = find_profile(payload.profile_id)
-        selected_rules: list[DanmakuRule] | None = None
-        if payload.rule_scope == "global":
-            selected_rules = (
-                await asyncio.to_thread(repository.list_global_rules)
-                if repository
-                else list(global_rules)
-            )
-        return await sessions.start(payload, profile, selected_rules)
+        return await sessions.start(payload, profile)
 
     @api.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def stop_session(

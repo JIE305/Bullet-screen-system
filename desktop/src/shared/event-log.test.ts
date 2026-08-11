@@ -75,25 +75,30 @@ describe('本地最近事件日志', () => {
   })
 
   it('解释识别结果为何没有或已经生成弹幕', () => {
-    const recognition = (id: string, rule_evaluation: Record<string, unknown>) =>
-      event(id, 'recognition.detected', { text: '胜利', rule_evaluation })
+    const recognition = (id: string, generation_evaluation: Record<string, unknown>) =>
+      event(id, 'recognition.detected', { text: '胜利', generation_evaluation })
 
-    expect(getEventSummary(recognition('7', { status: 'no_rule' }))).toBe(
-      '胜利 · 仅识别（尚未配置规则）'
+    expect(getEventSummary(recognition('7', { status: 'calling' }))).toBe('胜利 · 已提交 AI')
+    expect(getEventSummary(recognition('8', { status: 'generated' }))).toBe('胜利 · AI 已生成弹幕')
+    expect(getEventSummary(recognition('9', { status: 'not_selected' }))).toBe('胜利 · 本帧未选中')
+    expect(getEventSummary(recognition('10', { status: 'cloud_unavailable' }))).toBe('胜利 · AI 未配置')
+    expect(getEventSummary(recognition('11', { status: 'repeat_limited' }))).toBe('胜利 · 相同文字冷却中')
+    expect(getEventSummary(recognition('12', { status: 'interval_limited' }))).toBe('胜利 · 调用间隔限制')
+    expect(getEventSummary(recognition('13', { status: 'rate_limited' }))).toBe('胜利 · 每分钟调用已达上限')
+    expect(getEventSummary(recognition('14', { status: 'failed', reason: 'timeout' }))).toBe(
+      '胜利 · AI 调用失败：timeout'
     )
-    expect(
-      getEventSummary(
-        recognition('8', {
-          status: 'not_matched',
-          checks: [{ match_type: 'contains', pattern: '测试' }]
-        })
-      )
-    ).toBe('胜利 · 未命中（全局规则：包含“测试”）')
-    expect(getEventSummary(recognition('9', { status: 'cooldown' }))).toBe(
-      '胜利 · 已命中，冷却中'
-    )
-    expect(
-      getEventSummary(recognition('10', { status: 'emitted', emitted_message_count: 1 }))
-    ).toBe('胜利 · 已生成 1 条弹幕')
+  })
+
+  it('相同识别事件的最终状态更新不会产生重复日志', () => {
+    const calling = event('same-id', 'recognition.detected', {
+      text: '胜利', generation_evaluation: { status: 'calling' }
+    })
+    const generated = event('same-id', 'recognition.detected', {
+      text: '胜利', generation_evaluation: { status: 'generated' }
+    })
+    const events = prependEvent(prependEvent([], calling), generated)
+    expect(events).toHaveLength(1)
+    expect(getEventSummary(events[0])).toBe('胜利 · AI 已生成弹幕')
   })
 })

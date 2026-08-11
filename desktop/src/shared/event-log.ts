@@ -16,37 +16,20 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
 }
 
-function recognitionRuleSummary(event: EventEnvelope): string | undefined {
+function recognitionGenerationSummary(event: EventEnvelope): string | undefined {
   if (event.type !== 'recognition.detected') return undefined
   const text = typeof event.payload.text === 'string' ? event.payload.text.trim() : ''
-  const evaluation = recordValue(event.payload.rule_evaluation)
+  const evaluation = recordValue(event.payload.generation_evaluation)
   const status = evaluation?.status
   if (!text || typeof status !== 'string') return text || undefined
-  if (status === 'no_rule') return `${text} · 仅识别（尚未配置规则）`
-  if (status === 'cooldown') return `${text} · 已命中，冷却中`
-  if (status === 'emitted') {
-    const count = Number(evaluation?.emitted_message_count)
-    return `${text} · 已生成 ${Number.isFinite(count) ? count : 1} 条弹幕`
-  }
-  if (status === 'not_matched') {
-    const configuredCount = Number(evaluation?.configured_rule_count)
-    if (Number.isFinite(configuredCount) && configuredCount > 2) {
-      return `${text} · 未命中（已检查 ${configuredCount} 条全局规则）`
-    }
-    const checks = Array.isArray(evaluation?.checks) ? evaluation.checks : []
-    const rules = checks
-      .map(recordValue)
-      .filter((check): check is Record<string, unknown> => Boolean(check))
-      .map((check) => {
-        const pattern = typeof check.pattern === 'string' ? check.pattern.trim() : ''
-        if (!pattern) return ''
-        return `${check.match_type === 'exact' ? '完全匹配' : '包含'}“${pattern}”`
-      })
-      .filter(Boolean)
-      .slice(0, 2)
-      .join('、')
-    return rules ? `${text} · 未命中（全局规则：${rules}）` : `${text} · 未命中全局规则`
-  }
+  if (status === 'calling') return `${text} · 已提交 AI`
+  if (status === 'generated') return `${text} · AI 已生成弹幕`
+  if (status === 'not_selected') return `${text} · 本帧未选中`
+  if (status === 'cloud_unavailable') return `${text} · AI 未配置`
+  if (status === 'repeat_limited') return `${text} · 相同文字冷却中`
+  if (status === 'interval_limited') return `${text} · 调用间隔限制`
+  if (status === 'rate_limited') return `${text} · 每分钟调用已达上限`
+  if (status === 'failed') return `${text} · AI 调用失败：${String(evaluation?.reason ?? 'unknown')}`
   return text
 }
 
@@ -80,7 +63,7 @@ export function clearEvents(
 
 export function getEventSummary(event: EventEnvelope): string {
   if (event.type === 'danmaku.created') return getDanmakuText(event)
-  const recognitionSummary = recognitionRuleSummary(event)
+  const recognitionSummary = recognitionGenerationSummary(event)
   if (recognitionSummary) return recognitionSummary
   for (const key of ['text', 'status', 'message'] as const) {
     const value = event.payload[key]

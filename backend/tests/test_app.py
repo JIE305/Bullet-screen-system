@@ -68,6 +68,7 @@ def make_session(client: TestClient, profile_id: str) -> dict:
             "source_id": "window:100:0",
             "hwnd": 100,
             "window_name": "DaMu Test Scene",
+            "generation_mode": "profile_template",
         },
     )
     assert response.status_code == 201
@@ -164,8 +165,8 @@ def test_frame_emits_recognition_and_danmaku_events() -> None:
             recognition = websocket.receive_json()
             danmaku = websocket.receive_json()
             assert recognition["type"] == "recognition.detected"
-            assert recognition["payload"]["rule_evaluation"]["status"] == "emitted"
-            assert recognition["payload"]["rule_evaluation"]["emitted_message_count"] == 1
+            assert recognition["payload"]["generation_evaluation"]["status"] == "generated"
+            assert recognition["payload"]["generation_evaluation"]["mode"] == "profile_template"
             assert danmaku["type"] == "danmaku.created"
             assert UUID(danmaku["payload"]["message_id"])
             assert "链路已连通" in danmaku["payload"]["text"]
@@ -323,61 +324,14 @@ def test_session_without_rules_emits_explained_recognition_only() -> None:
 
         recognition = next(event for event in events if event.type == "recognition.detected")
         assert recognition.payload["text"] == "胜利"
-        assert recognition.payload["rule_evaluation"]["status"] == "no_rule"
+        assert recognition.payload["generation_evaluation"]["status"] == "cloud_unavailable"
         assert not any(event.type == "danmaku.created" for event in events)
         await manager.close_all()
 
     asyncio.run(scenario())
 
 
-def test_global_rules_generate_for_two_profiles_without_local_rules() -> None:
-    class VictoryRecognizer:
-        name = "victory"
-
-        async def recognize(self, image: bytes, preprocess_mode: str = "original"):
-            return [RecognitionCandidate("胜利", 0.99996)]
-
-        async def close(self) -> None:
-            return None
-
-    with TestClient(create_app(TOKEN, recognizer=VictoryRecognizer())) as client:
-        saved = client.put(
-            "/api/v1/rules/global",
-            headers=HEADERS,
-            json=[{
-                "match_type": "contains", "pattern": "胜利", "template": "全局 · {text}",
-                "confidence": 0.65, "cooldown_ms": 5000, "enabled": True,
-            }],
-        )
-        assert saved.status_code == 200
-        profiles = [
-            client.post("/api/v1/profiles", headers=HEADERS, json={"name": name}).json()
-            for name in ("窗口 A", "窗口 B")
-        ]
-        with client.websocket_connect("/ws/v1/events", headers=HEADERS) as websocket:
-            for index, profile in enumerate(profiles, start=1):
-                session = client.post(
-                    "/api/v1/sessions",
-                    headers=HEADERS,
-                    json={
-                        "profile_id": profile["id"], "source_id": f"window:{index}:0",
-                        "hwnd": index, "window_name": profile["name"], "rule_scope": "global",
-                    },
-                ).json()
-                assert websocket.receive_json()["payload"]["status"] == "running"
-                response = client.post(
-                    f"/api/v1/sessions/{session['id']}/frames",
-                    headers=HEADERS,
-                    data={
-                        "frame_id": str(uuid4()), "region_id": profile["regions"][0]["id"],
-                        "captured_at": datetime.now(UTC).isoformat(), "width": "640", "height": "160",
-                    },
-                    files={"image": ("frame.jpg", jpeg_bytes(), "image/jpeg")},
-                )
-                assert response.status_code == 202
-                recognition = websocket.receive_json()
-                danmaku = websocket.receive_json()
-                assert recognition["payload"]["rule_evaluation"]["status"] == "emitted"
-                assert danmaku["payload"]["text"] == "全局 · 胜利"
-                assert client.delete(f"/api/v1/sessions/{session['id']}", headers=HEADERS).status_code == 204
-                assert websocket.receive_json()["payload"]["status"] == "stopped"
+def test_global_rule_api_is_removed() -> None:
+    with TestClient(create_app(TOKEN)) as client:
+        assert client.get("/api/v1/rules/global", headers=HEADERS).status_code == 404
+        assert client.put("/api/v1/rules/global", headers=HEADERS, json=[]).status_code == 404

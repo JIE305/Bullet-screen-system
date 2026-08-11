@@ -4,10 +4,8 @@ import { damuApi, isBrowserPreview } from './api'
 import type { AppState, CaptureSourceInfo, EventEnvelope } from '../../shared/contracts'
 import {
   DEFAULT_ROI,
-  createRuleSettings,
   type PreprocessMode,
-  type RoiSettings,
-  type RuleSettings
+  type RoiSettings
 } from '../../shared/capture-settings'
 import {
   DEFAULT_EVENT_LOG_FILTER,
@@ -23,8 +21,7 @@ import CloudApiDrawer from './CloudApiDrawer.vue'
 import {
   cloneDefaultCloudApiSettings,
   type CloudApiPublicSettings,
-  type CloudApiRuntimeState,
-  type CloudApiTestResult
+  type CloudApiRuntimeState
 } from '../../shared/cloud-api'
 
 const state = ref<AppState>({
@@ -36,10 +33,9 @@ const state = ref<AppState>({
 })
 const sources = ref<CaptureSourceInfo[]>([])
 const selectedSourceId = ref('')
+const gameName = ref('')
 const roi = ref<RoiSettings>({ ...DEFAULT_ROI })
 const preprocessMode = ref<PreprocessMode>('original')
-const globalRules = ref<RuleSettings[]>([])
-const savedGlobalRules = ref<RuleSettings[]>([])
 const busy = ref(false)
 const loadingSources = ref(false)
 const localError = ref('')
@@ -117,22 +113,24 @@ const cloudStatusLabel = computed(() => ({
 const canEnableCloud = computed(() =>
   Boolean(cloudSettings.value.hasApiKey && cloudSettings.value.baseUrl && cloudSettings.value.model)
 )
-const rulesDirty = computed(
-  () => JSON.stringify(globalRules.value) !== JSON.stringify(savedGlobalRules.value)
-)
-const ruleNotice = computed(() => {
-  if (globalRules.value.length === 0) return '仅识别模式：尚未配置全局关键词，OCR 结果不会生成弹幕。'
-  const enabled = globalRules.value.filter((item) => item.enabled).length
-  return `已配置 ${globalRules.value.length} 条全局规则，其中 ${enabled} 条启用；所有真实窗口共享。`
+const policyDraft = ref({
+  minConfidence: cloudSettings.value.minConfidence,
+  minIntervalMs: cloudSettings.value.minIntervalMs,
+  repeatCooldownMs: cloudSettings.value.repeatCooldownMs,
+  maxCallsPerMinute: cloudSettings.value.maxCallsPerMinute
 })
+const savedPolicy = ref({ ...policyDraft.value })
+const policyDirty = computed(() => JSON.stringify(policyDraft.value) !== JSON.stringify(savedPolicy.value))
 
 watch(selectedSourceId, async (sourceId) => {
   if (!sourceId || state.value.session !== 'idle') return
+  gameName.value = sources.value.find((source) => source.id === sourceId)?.name ?? ''
   roi.value = { ...DEFAULT_ROI }
   preprocessMode.value = 'original'
   try {
     const saved = await damuApi.getCaptureSettings(sourceId)
     if (!saved || selectedSourceId.value !== sourceId) return
+    gameName.value = saved.gameName || gameName.value
     roi.value = { ...saved.region }
     preprocessMode.value = saved.preprocessMode
   } catch (error) {
@@ -227,36 +225,11 @@ function endRoi(event: PointerEvent): void {
   roiStart = undefined
 }
 
-function cloneRules(rules: RuleSettings[]): RuleSettings[] {
-  return rules.map((item) => ({ ...item }))
-}
-
-async function loadGlobalRules(): Promise<void> {
-  const loaded = await damuApi.getGlobalRules()
-  globalRules.value = cloneRules(loaded)
-  savedGlobalRules.value = cloneRules(loaded)
-}
-
-function addGlobalRule(): void {
-  globalRules.value.push(createRuleSettings())
-}
-
-function removeGlobalRule(index: number): void {
-  globalRules.value.splice(index, 1)
-}
-
-async function saveGlobalRules(): Promise<void> {
-  if (state.value.session !== 'idle') throw new Error('请先停止当前会话，再保存全局规则')
-  const saved = await damuApi.updateGlobalRules(cloneRules(globalRules.value))
-  globalRules.value = cloneRules(saved)
-  savedGlobalRules.value = cloneRules(saved)
-}
-
 async function startSelectedSource(): Promise<void> {
   normalizeRoi()
-  await saveGlobalRules()
   await damuApi.startSource({
     sourceId: selectedSourceId.value,
+    gameName: gameName.value.trim(),
     region: { ...roi.value },
     preprocessMode: preprocessMode.value
   })
@@ -312,15 +285,33 @@ async function closeCloudDrawer(): Promise<void> {
 
 function applyCloudSettings(settings: CloudApiPublicSettings): void {
   cloudSettings.value = { ...settings }
+  policyDraft.value = {
+    minConfidence: settings.minConfidence,
+    minIntervalMs: settings.minIntervalMs,
+    repeatCooldownMs: settings.repeatCooldownMs,
+    maxCallsPerMinute: settings.maxCallsPerMinute
+  }
+  savedPolicy.value = { ...policyDraft.value }
 }
 
-function applyCloudTest(result: CloudApiTestResult): void {
-  cloudState.value = {
-    status: cloudSettings.value.enabled ? 'ready' : 'disabled',
-    model: result.model,
-    lastLatencyMs: result.elapsedMs,
-    lastResult: result.text
-  }
+function updatePolicyMilliseconds(
+  key: 'minIntervalMs' | 'repeatCooldownMs',
+  event: Event
+): void {
+  policyDraft.value[key] = Math.round(Number((event.target as HTMLInputElement).value) * 1000)
+}
+
+async function saveGenerationPolicy(): Promise<void> {
+  if (state.value.session !== 'idle') throw new Error('请先停止当前会话，再保存生成策略')
+  const saved = await damuApi.saveCloudApiSettings({
+    enabled: cloudSettings.value.enabled,
+    baseUrl: cloudSettings.value.baseUrl,
+    model: cloudSettings.value.model,
+    systemPrompt: cloudSettings.value.systemPrompt,
+    timeoutMs: cloudSettings.value.timeoutMs,
+    ...policyDraft.value
+  })
+  applyCloudSettings(saved)
 }
 
 async function toggleCloudEnabled(): Promise<void> {
@@ -334,14 +325,12 @@ async function toggleCloudEnabled(): Promise<void> {
     model: cloudSettings.value.model,
     systemPrompt: cloudSettings.value.systemPrompt,
     timeoutMs: cloudSettings.value.timeoutMs,
+    minConfidence: cloudSettings.value.minConfidence,
+    minIntervalMs: cloudSettings.value.minIntervalMs,
+    repeatCooldownMs: cloudSettings.value.repeatCooldownMs,
     maxCallsPerMinute: cloudSettings.value.maxCallsPerMinute
   })
   applyCloudSettings(saved)
-}
-
-async function testCloudFromRail(): Promise<void> {
-  const result = await damuApi.testCloudApi()
-  applyCloudTest(result)
 }
 
 onMounted(async () => {
@@ -356,9 +345,8 @@ onMounted(async () => {
     cloudState.value = next
   })
   try {
-    const [, , cloud] = await Promise.all([
+    const [, cloud] = await Promise.all([
       refreshSources(),
-      loadGlobalRules(),
       damuApi.getCloudApiSettings()
     ])
     applyCloudSettings(cloud)
@@ -386,15 +374,37 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <nav class="step-nav" aria-label="开发阶段">
-        <div class="step">
-          <span>01</span>
-          <div><strong>通信链路</strong><small>WEEK 01 · COMPLETE</small></div>
+      <section class="generation-policy" aria-labelledby="generation-policy-title">
+        <header>
+          <span class="label">AI GENERATION POLICY</span>
+          <h2 id="generation-policy-title">AI 弹幕生成策略</h2>
+        </header>
+        <div class="policy-fields" data-testid="generation-policy">
+          <label>
+            <span>最低 OCR 置信度</span>
+            <input v-model.number="policyDraft.minConfidence" type="number" min="0.5" max="1" step="0.05" :disabled="state.session !== 'idle'" />
+          </label>
+          <label>
+            <span>最小调用间隔</span>
+            <span class="policy-value"><input :value="policyDraft.minIntervalMs / 1000" type="number" min="5" max="60" step="1" :disabled="state.session !== 'idle'" @input="updatePolicyMilliseconds('minIntervalMs', $event)" /><b>秒</b></span>
+          </label>
+          <label>
+            <span>相同文字冷却</span>
+            <span class="policy-value"><input :value="policyDraft.repeatCooldownMs / 1000" type="number" min="10" max="300" step="1" :disabled="state.session !== 'idle'" @input="updatePolicyMilliseconds('repeatCooldownMs', $event)" /><b>秒</b></span>
+          </label>
+          <label>
+            <span>每分钟调用上限</span>
+            <span class="policy-value"><input v-model.number="policyDraft.maxCallsPerMinute" type="number" min="1" max="12" step="1" :disabled="state.session !== 'idle'" /><b>次</b></span>
+          </label>
         </div>
-        <div class="step"><span>02</span><div><strong>视觉识别</strong><small>OCR · COMPLETE</small></div></div>
-        <div class="step"><span>03</span><div><strong>数据持久化</strong><small>SQLITE · COMPLETE</small></div></div>
-        <div class="step current"><span>04</span><div><strong>打包验收</strong><small>RELEASE · ACTIVE</small></div></div>
-      </nav>
+        <p>每帧最多选择一段文字。AI 未配置或调用受限时只记录 OCR，不生成弹幕。</p>
+        <button
+          type="button"
+          data-testid="generation-policy-save"
+          :disabled="state.session !== 'idle' || busy || !policyDirty"
+          @click="run(saveGenerationPolicy)"
+        >{{ policyDirty ? '保存生成策略' : '策略已保存' }}</button>
+      </section>
 
       <section class="cloud-card" aria-labelledby="cloud-card-title">
         <div class="cloud-card-head">
@@ -404,7 +414,7 @@ onUnmounted(() => {
         <strong>{{ cloudStatusLabel }}</strong>
         <p :title="cloudSettings.model || '尚未配置模型'">{{ cloudSettings.model || 'NO MODEL CONFIGURED' }}</p>
         <small v-if="cloudState.lastLatencyMs !== undefined">LAST · {{ Math.round(cloudState.lastLatencyMs) }} MS</small>
-        <small v-else>KEYWORD-GATED · TEXT ONLY</small>
+        <small v-else>OCR-DIRECT · TEXT ONLY</small>
         <div class="cloud-card-actions">
           <button
             type="button"
@@ -412,18 +422,8 @@ onUnmounted(() => {
             @click="run(toggleCloudEnabled)"
           >{{ cloudSettings.enabled ? '停用' : '启用' }}</button>
           <button ref="cloudTrigger" data-testid="cloud-config-trigger" type="button" @click="openCloudDrawer">配置</button>
-          <button
-            type="button"
-            :disabled="state.session !== 'idle' || busy || !canEnableCloud"
-            @click="run(testCloudFromRail)"
-          >测试</button>
         </div>
       </section>
-
-      <div class="rail-note">
-        <span class="label">阶段边界</span>
-        <p>RapidOCR、单区域规则与 SQLite 已接入；安装包已生成，当前进入实际游戏与长时稳定性验收。</p>
-      </div>
       <div v-if="isBrowserPreview" class="preview-flag">BROWSER PREVIEW</div>
     </aside>
 
@@ -485,11 +485,24 @@ onUnmounted(() => {
             </button>
           </div>
 
+          <label class="game-name-field">
+            <span>
+              <b>游戏名称候选</b>
+              <small>可修改确认；仅该名称会随选中的 OCR 文字发送给云端</small>
+            </span>
+            <input
+              v-model="gameName"
+              maxlength="120"
+              :disabled="state.session !== 'idle' || !selectedSourceId"
+              placeholder="例如：英雄联盟（留空时生成通用弹幕）"
+            />
+          </label>
+
           <div class="capture-setup">
             <section class="roi-config" aria-labelledby="roi-heading">
               <div class="setup-heading">
                 <div><span class="label">02 / REGION</span><h3 id="roi-heading">识别区域</h3></div>
-                <span>拖拽重画</span>
+                <label class="preprocess-field compact"><span>当前窗口预处理</span><select v-model="preprocessMode" :disabled="state.session !== 'idle'"><option value="original">原始画面</option><option value="high_contrast">高对比度</option></select></label>
               </div>
               <div
                 class="roi-canvas"
@@ -511,34 +524,6 @@ onUnmounted(() => {
               </div>
             </section>
 
-            <section class="rule-config" aria-labelledby="rule-heading">
-              <div class="setup-heading">
-                <div><span class="label">03 / GLOBAL RULES</span><h3 id="rule-heading">全局弹幕规则</h3></div>
-                <button class="rule-add" type="button" :disabled="state.session !== 'idle'" @click="addGlobalRule">＋ 添加</button>
-              </div>
-              <label class="preprocess-field"><span>当前窗口预处理</span><select v-model="preprocessMode" :disabled="state.session !== 'idle'"><option value="original">原始画面</option><option value="high_contrast">高对比度</option></select></label>
-              <div v-if="globalRules.length" class="global-rule-list">
-                <article v-for="(item, index) in globalRules" :key="item.id || index" class="global-rule-card">
-                  <div class="global-rule-card-head">
-                    <strong>规则 {{ String(index + 1).padStart(2, '0') }}</strong>
-                    <label class="rule-enabled"><input v-model="item.enabled" type="checkbox" :disabled="state.session !== 'idle'" /><span>启用</span></label>
-                    <button type="button" :disabled="state.session !== 'idle'" @click="removeGlobalRule(index)">移除</button>
-                  </div>
-                  <div class="rule-fields">
-                    <label><span>匹配</span><select v-model="item.matchType" :disabled="state.session !== 'idle'"><option value="contains">包含</option><option value="exact">完全匹配</option></select></label>
-                    <label><span>关键词</span><input v-model="item.pattern" maxlength="200" :disabled="state.session !== 'idle'" /></label>
-                    <label class="wide"><span>弹幕模板</span><input v-model="item.template" maxlength="240" :disabled="state.session !== 'idle'" /></label>
-                    <label><span>置信度</span><input v-model.number="item.confidence" type="number" min="0" max="1" step="0.05" :disabled="state.session !== 'idle'" /></label>
-                    <label><span>冷却 ms</span><input v-model.number="item.cooldownMs" type="number" min="0" max="60000" step="500" :disabled="state.session !== 'idle'" /></label>
-                  </div>
-                </article>
-              </div>
-              <div v-else class="global-rule-empty">尚无全局关键词。添加后，所有所选窗口都会使用同一套规则。</div>
-              <div class="rule-save-row">
-                <p class="rule-notice">{{ ruleNotice }}</p>
-                <button type="button" :disabled="state.session !== 'idle' || busy || !rulesDirty" @click="run(saveGlobalRules)">{{ rulesDirty ? '保存全局规则' : '规则已保存' }}</button>
-              </div>
-            </section>
           </div>
 
           <div class="action-bar">
@@ -654,7 +639,6 @@ onUnmounted(() => {
       :session-active="state.session !== 'idle'"
       @close="closeCloudDrawer"
       @saved="applyCloudSettings"
-      @tested="applyCloudTest"
     />
   </div>
 </template>

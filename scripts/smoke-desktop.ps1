@@ -19,6 +19,14 @@ $electronPath = if ($Packaged) {
 }
 
 New-Item -ItemType Directory -Force $runtime | Out-Null
+$resolvedRuntime = [System.IO.Path]::GetFullPath($runtime)
+$resolvedSmokeUserData = [System.IO.Path]::GetFullPath($smokeUserData)
+if (-not $resolvedSmokeUserData.StartsWith($resolvedRuntime, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Smoke user-data path escaped runtime directory: $resolvedSmokeUserData"
+}
+if (Test-Path -LiteralPath $resolvedSmokeUserData) {
+    Remove-Item -LiteralPath $resolvedSmokeUserData -Recurse -Force
+}
 if (Test-Path -LiteralPath $resultPath) {
     Remove-Item -LiteralPath $resultPath -Force
 }
@@ -74,6 +82,16 @@ try {
         -not $result.event_filtered_clear_verified -or
         -not $result.cloud_rail_fits_1100x720 -or
         -not $result.cloud_no_horizontal_overflow -or
+        -not $result.stage_navigation_removed -or
+        -not $result.cloud_test_action_removed -or
+        -not $result.generation_policy_defaults_verified -or
+        -not $result.generation_policy_editable -or
+        -not $result.generation_policy_save_verified -or
+        -not $result.generation_policy_restore_verified -or
+        -not $result.generation_policy_in_rail -or
+        -not $result.generation_policy_disabled_while_running -or
+        -not $result.workspace_global_rules_removed -or
+        -not $result.cloud_save_reachable -or
         -not $result.cloud_drawer_scrollable -or
         -not $result.cloud_drawer_bottom_reachable -or
         -not $result.cloud_key_hidden_from_renderer -or

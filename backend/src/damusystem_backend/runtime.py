@@ -10,10 +10,17 @@ from uuid import UUID, uuid4
 
 from fastapi import WebSocket
 
-from .contracts import DanmakuRule, EventEnvelope, ProfileRecord, SessionCreate, SessionRecord, utc_now
-from .recognition import Recognizer
+from .contracts import EventEnvelope, ProfileRecord, SessionCreate, SessionRecord, utc_now
+from .recognition import RecognitionCandidate, Recognizer
 from .rules import RuleEngine
-from .generation import DanmakuGenerator, FallbackDanmakuGenerator
+from .generation import (
+    DanmakuGenerationInput,
+    DirectAiDanmakuGenerator,
+    GenerationFailure,
+    GenerationOutput,
+    GenerationService,
+)
+from .rules import normalize_text
 
 
 class EventHub:
@@ -60,8 +67,8 @@ class ActiveSession:
     record: SessionRecord
     queue: asyncio.Queue[FrameItem]
     worker: asyncio.Task[None]
-    rules: RuleEngine
-    generator: DanmakuGenerator
+    rules: RuleEngine | None
+    generator: DirectAiDanmakuGenerator | None
 
 
 class SessionManager:
@@ -70,13 +77,14 @@ class SessionManager:
         hub: EventHub,
         recognizer: Recognizer,
         session_sink: Callable[[SessionRecord], None] | None = None,
-        generator_factory: Callable[[], DanmakuGenerator] | None = None,
+        generator_factory: Callable[[], DirectAiDanmakuGenerator] | None = None,
     ) -> None:
         self._hub = hub
         self._recognizer = recognizer
         self._sessions: dict[UUID, ActiveSession] = {}
         self._session_sink = session_sink
-        self._generator_factory = generator_factory or (lambda: FallbackDanmakuGenerator(None))
+        default_generation = GenerationService()
+        self._generator_factory = generator_factory or default_generation.create_generator
 
     def get(self, session_id: UUID) -> ActiveSession | None:
         return self._sessions.get(session_id)
@@ -85,14 +93,14 @@ class SessionManager:
         self,
         request: SessionCreate,
         profile: ProfileRecord,
-        selected_rules: list[DanmakuRule] | None = None,
     ) -> SessionRecord:
         record = SessionRecord(**request.model_dump())
         queue: asyncio.Queue[FrameItem] = asyncio.Queue(maxsize=1)
-        rules = RuleEngine(profile.rules if selected_rules is None else selected_rules)
-        generator = self._generator_factory()
+        rules = RuleEngine(profile.rules) if request.generation_mode == "profile_template" else None
+        generator = self._generator_factory() if request.generation_mode == "ai" else None
         worker = asyncio.create_task(
-            self._run_worker(record, queue, rules, generator), name=f"frame-worker-{record.id}"
+            self._run_worker(record, queue, rules, generator, profile.game_name),
+            name=f"frame-worker-{record.id}",
         )
         self._sessions[record.id] = ActiveSession(record, queue, worker, rules, generator)
         if self._session_sink is not None:
@@ -118,7 +126,8 @@ class SessionManager:
             await active.worker
         except asyncio.CancelledError:
             pass
-        await active.generator.close()
+        if active.generator is not None:
+            await active.generator.close()
         if self._session_sink is not None:
             await asyncio.to_thread(self._session_sink, active.record)
         await self._hub.publish(
@@ -151,9 +160,11 @@ class SessionManager:
         self,
         record: SessionRecord,
         queue: asyncio.Queue[FrameItem],
-        rules: RuleEngine,
-        generator: DanmakuGenerator,
+        rules: RuleEngine | None,
+        generator: DirectAiDanmakuGenerator | None,
+        game_name: str | None,
     ) -> None:
+        last_seen: dict[tuple[str, str], float] = {}
         while True:
             frame = await queue.get()
             started = time.perf_counter()
@@ -162,77 +173,116 @@ class SessionManager:
                     frame.image, frame.preprocess_mode
                 )
                 processing_ms = round((time.perf_counter() - started) * 1000, 2)
-                for candidate in candidates:
-                    accepted = rules.accept(str(frame.region_id), candidate)
-                    if accepted is None:
-                        continue
-                    normalized = accepted.normalized_text
-                    messages = accepted.messages
-                    recognition_id = uuid4()
-                    await self._hub.publish(
-                        EventEnvelope(
-                            event_id=recognition_id,
-                            type="recognition.detected",
-                            session_id=record.id,
-                            payload={
-                                "region_id": str(frame.region_id),
-                                "text": candidate.text,
-                                "normalized_text": normalized,
-                                "confidence": candidate.confidence,
-                                "box": candidate.box,
-                                "observed_at": frame.captured_at.astimezone(UTC).isoformat(),
-                                "content_hash": hashlib.sha256(normalized.encode()).hexdigest(),
-                                "processing_ms": processing_ms,
-                                "rule_evaluation": {
-                                    "status": accepted.status,
-                                    "configured_rule_count": len(accepted.checks),
-                                    "matched_rule_count": accepted.matched_rule_count,
-                                    "emitted_message_count": len(messages),
-                                    "checks": [
-                                        {
-                                            "rule_id": check.rule_id,
-                                            "match_type": check.match_type,
-                                            "pattern": check.pattern,
-                                            "status": check.status,
-                                        }
-                                        for check in accepted.checks
-                                    ],
-                                },
-                            },
-                        )
-                    )
-                    for message in messages:
-                        generated = await generator.generate(candidate.text, message.text)
-                        now = utc_now()
+                if record.generation_mode == "profile_template":
+                    assert rules is not None
+                    for candidate in candidates:
+                        accepted = rules.accept(str(frame.region_id), candidate)
+                        if accepted is None:
+                            continue
+                        recognition_id = uuid4()
                         await self._hub.publish(
                             EventEnvelope(
-                                type="danmaku.created",
+                                event_id=recognition_id,
+                                type="recognition.detected",
                                 session_id=record.id,
                                 payload={
-                                    "message_id": str(uuid4()),
-                                    "recognition_event_id": str(recognition_id),
-                                    "rule_id": message.rule_id,
-                                    "text": generated.text,
-                                    "style": {"tone": "signal", "speed": "normal"},
-                                    "duration_ms": 7200,
-                                    "created_at": now.isoformat(),
+                                    "region_id": str(frame.region_id),
+                                    "text": candidate.text,
+                                    "normalized_text": accepted.normalized_text,
+                                    "confidence": candidate.confidence,
+                                    "box": candidate.box,
+                                    "observed_at": frame.captured_at.astimezone(UTC).isoformat(),
+                                    "content_hash": hashlib.sha256(accepted.normalized_text.encode()).hexdigest(),
                                     "processing_ms": processing_ms,
-                                    "generator": generated.generator,
-                                    "generation_ms": generated.generation_ms,
-                                    **(
-                                        {"fallback_reason": generated.fallback_reason}
-                                        if generated.fallback_reason
-                                        else {}
-                                    ),
-                                    **({"model": generated.model} if generated.model else {}),
-                                    **(
-                                        {"provider_request_id": generated.provider_request_id}
-                                        if generated.provider_request_id
-                                        else {}
-                                    ),
+                                    "generation_evaluation": {
+                                        "status": "generated" if accepted.messages else "not_selected",
+                                        "mode": "profile_template",
+                                    },
                                 },
                             )
                         )
+                        for message in accepted.messages:
+                            await self._publish_danmaku(
+                                record,
+                                recognition_id,
+                                GenerationOutput(message.text, "template", 0),
+                                processing_ms,
+                                rule_id=message.rule_id,
+                            )
+                    continue
+
+                assert generator is not None
+                eligible: list[tuple[RecognitionCandidate, str, UUID]] = []
+                current = time.monotonic()
+                for candidate in candidates:
+                    if candidate.confidence < generator.minimum_confidence:
+                        continue
+                    normalized = normalize_text(candidate.text)
+                    if not normalized:
+                        continue
+                    dedupe_key = (str(frame.region_id), normalized)
+                    previous = last_seen.get(dedupe_key)
+                    if previous is not None and current - previous < 3:
+                        continue
+                    last_seen[dedupe_key] = current
+                    eligible.append((candidate, normalized, uuid4()))
+
+                if not eligible:
+                    continue
+                selected = max(eligible, key=lambda item: item[0].confidence)
+                for candidate, normalized, recognition_id in eligible:
+                    payload = {
+                        "region_id": str(frame.region_id),
+                        "text": candidate.text,
+                        "normalized_text": normalized,
+                        "confidence": candidate.confidence,
+                        "box": candidate.box,
+                        "observed_at": frame.captured_at.astimezone(UTC).isoformat(),
+                        "content_hash": hashlib.sha256(normalized.encode()).hexdigest(),
+                        "processing_ms": processing_ms,
+                    }
+                    if recognition_id != selected[2]:
+                        await self._publish_recognition(
+                            record, recognition_id, payload, "not_selected"
+                        )
+                        continue
+
+                    if not generator.configured:
+                        await self._publish_recognition(
+                            record, recognition_id, payload, "cloud_unavailable"
+                        )
+                        continue
+                    generation_input = DanmakuGenerationInput(
+                        game_name=game_name,
+                        ocr_text=candidate.text,
+                    )
+                    limited = await generator.reserve(generation_input)
+                    if limited:
+                        await self._publish_recognition(
+                            record, recognition_id, payload, limited
+                        )
+                        continue
+                    await self._publish_recognition(record, recognition_id, payload, "calling")
+                    try:
+                        generated = await generator.generate_reserved(generation_input)
+                    except GenerationFailure as exc:
+                        final_status = (
+                            exc.reason
+                            if exc.reason in {"interval_limited", "repeat_limited", "rate_limited"}
+                            else "failed"
+                        )
+                        await self._publish_recognition(
+                            record,
+                            recognition_id,
+                            payload,
+                            final_status,
+                            reason=exc.reason,
+                        )
+                        continue
+                    await self._publish_recognition(record, recognition_id, payload, "generated")
+                    await self._publish_danmaku(
+                        record, recognition_id, generated, processing_ms, rule_id=None
+                    )
             except Exception as exc:
                 await self._hub.publish(
                     EventEnvelope(
@@ -243,3 +293,63 @@ class SessionManager:
                 )
             finally:
                 queue.task_done()
+
+    async def _publish_recognition(
+        self,
+        record: SessionRecord,
+        recognition_id: UUID,
+        payload: dict[str, object],
+        status: str,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        await self._hub.publish(
+            EventEnvelope(
+                event_id=recognition_id,
+                type="recognition.detected",
+                session_id=record.id,
+                payload={
+                    **payload,
+                    "generation_evaluation": {
+                        "status": status,
+                        "mode": "ai",
+                        **({"reason": reason} if reason else {}),
+                    },
+                },
+            )
+        )
+
+    async def _publish_danmaku(
+        self,
+        record: SessionRecord,
+        recognition_id: UUID,
+        generated: GenerationOutput,
+        processing_ms: float,
+        *,
+        rule_id: str | None,
+    ) -> None:
+        now = utc_now()
+        await self._hub.publish(
+            EventEnvelope(
+                type="danmaku.created",
+                session_id=record.id,
+                payload={
+                    "message_id": str(uuid4()),
+                    "recognition_event_id": str(recognition_id),
+                    "rule_id": rule_id,
+                    "text": generated.text,
+                    "style": {"tone": "signal", "speed": "normal"},
+                    "duration_ms": 7200,
+                    "created_at": now.isoformat(),
+                    "processing_ms": processing_ms,
+                    "generator": generated.generator,
+                    "generation_ms": generated.generation_ms,
+                    **({"model": generated.model} if generated.model else {}),
+                    **(
+                        {"provider_request_id": generated.provider_request_id}
+                        if generated.provider_request_id
+                        else {}
+                    ),
+                },
+            )
+        )

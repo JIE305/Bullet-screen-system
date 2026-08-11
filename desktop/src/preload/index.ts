@@ -18,15 +18,10 @@ const api: DaMuApi = {
   startSource: (options) => ipcRenderer.invoke('damu:start-source', options) as Promise<void>,
   getCaptureSettings: (sourceId) =>
     ipcRenderer.invoke('damu:get-capture-settings', sourceId) as ReturnType<DaMuApi['getCaptureSettings']>,
-  getGlobalRules: () => ipcRenderer.invoke('damu:get-global-rules') as ReturnType<DaMuApi['getGlobalRules']>,
-  updateGlobalRules: (rules) =>
-    ipcRenderer.invoke('damu:update-global-rules', rules) as ReturnType<DaMuApi['updateGlobalRules']>,
   getCloudApiSettings: () =>
     ipcRenderer.invoke('damu:get-cloud-api-settings') as ReturnType<DaMuApi['getCloudApiSettings']>,
   saveCloudApiSettings: (input) =>
     ipcRenderer.invoke('damu:save-cloud-api-settings', input) as ReturnType<DaMuApi['saveCloudApiSettings']>,
-  testCloudApi: () =>
-    ipcRenderer.invoke('damu:test-cloud-api') as ReturnType<DaMuApi['testCloudApi']>,
   stopSession: () => ipcRenderer.invoke('damu:stop-session') as Promise<void>,
   sendOverlayTest: () => ipcRenderer.invoke('damu:overlay-test') as Promise<void>,
   copyText: (text) => ipcRenderer.invoke('damu:copy-text', text) as Promise<void>,

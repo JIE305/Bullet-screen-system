@@ -20,6 +20,7 @@ export interface RuleSettings {
 
 export interface CaptureStartOptions {
   sourceId: string
+  gameName: string
   region: RoiSettings
   preprocessMode: PreprocessMode
 }
@@ -35,19 +36,6 @@ export const DEFAULT_RULE: RuleSettings = {
   cooldownMs: 5000,
   enabled: true
 }
-export const OBSERVE_ONLY_RULE: RuleSettings = {
-  matchType: 'contains',
-  pattern: '',
-  template: '{text}',
-  confidence: 0.65,
-  cooldownMs: 5000,
-  enabled: true
-}
-
-export function createRuleSettings(): RuleSettings {
-  return { ...OBSERVE_ONLY_RULE }
-}
-
 function finiteInRange(value: unknown, minimum: number, maximum: number): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum
 }
@@ -57,6 +45,9 @@ export function parseCaptureStartOptions(value: unknown): CaptureStartOptions {
   const candidate = value as Partial<CaptureStartOptions>
   if (typeof candidate.sourceId !== 'string' || !candidate.sourceId || candidate.sourceId.length > 512) {
     throw new TypeError('捕获源 ID 无效')
+  }
+  if (typeof candidate.gameName !== 'string' || candidate.gameName.trim().length > 120) {
+    throw new TypeError('游戏名称不能超过 120 个字符')
   }
   const region = candidate.region
   if (
@@ -75,45 +66,8 @@ export function parseCaptureStartOptions(value: unknown): CaptureStartOptions {
   }
   return {
     sourceId: candidate.sourceId,
+    gameName: candidate.gameName.trim(),
     region: { ...region },
     preprocessMode: candidate.preprocessMode
   }
-}
-
-export function parseRuleSettings(value: unknown): RuleSettings {
-  if (!value || typeof value !== 'object') throw new TypeError('弹幕规则无效')
-  const rule = value as Partial<RuleSettings>
-  const cooldownMs = rule.cooldownMs
-  if (
-    (rule.matchType !== 'contains' && rule.matchType !== 'exact') ||
-    (rule.id !== undefined && (typeof rule.id !== 'string' || !rule.id || rule.id.length > 80)) ||
-    typeof rule.pattern !== 'string' ||
-    !rule.pattern.trim() ||
-    rule.pattern.length > 200 ||
-    typeof rule.template !== 'string' ||
-    !rule.template.includes('{text}') ||
-    rule.template.length > 240 ||
-    !finiteInRange(rule.confidence, 0, 1) ||
-    !Number.isInteger(cooldownMs) ||
-    typeof cooldownMs !== 'number' ||
-    cooldownMs < 0 ||
-    cooldownMs > 60000 ||
-    typeof rule.enabled !== 'boolean'
-  ) {
-    throw new TypeError('弹幕规则无效')
-  }
-  return {
-    ...(rule.id ? { id: rule.id } : {}),
-    matchType: rule.matchType,
-    pattern: rule.pattern.trim(),
-    template: rule.template.trim(),
-    confidence: rule.confidence,
-    cooldownMs,
-    enabled: rule.enabled
-  }
-}
-
-export function parseGlobalRules(value: unknown): RuleSettings[] {
-  if (!Array.isArray(value)) throw new TypeError('全局规则列表无效')
-  return value.map(parseRuleSettings)
 }

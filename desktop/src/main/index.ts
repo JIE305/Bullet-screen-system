@@ -29,7 +29,6 @@ import {
   DEFAULT_ROI,
   DEFAULT_RULE,
   parseCaptureStartOptions,
-  parseGlobalRules,
   type CaptureStartOptions
 } from '../shared/capture-settings'
 import { shouldForwardEventToOverlay } from '../shared/overlay-events'
@@ -44,11 +43,12 @@ import {
   isWindowUnavailableError,
   type WindowBoundsLike
 } from '../shared/window-bounds'
-import type { CloudApiRuntimeState, CloudApiTestResult } from '../shared/cloud-api'
+import type { CloudApiRuntimeState } from '../shared/cloud-api'
 
 interface ProfileResponse {
   id: string
   name: string
+  game_name?: string | null
   window_title_pattern?: string
   regions: Array<{
     id: string
@@ -69,25 +69,8 @@ interface ProfileResponse {
   }>
 }
 
-interface BackendRule {
-  id: string
-  match_type: 'contains' | 'exact'
-  pattern: string
-  template: string
-  confidence: number
-  cooldown_ms: number
-  enabled: boolean
-}
-
 interface SessionResponse {
   id: string
-}
-
-interface BackendGenerationTestResult {
-  text: string
-  elapsed_ms: number
-  model: string
-  provider_request_id?: string
 }
 
 const backend = new BackendClient()
@@ -115,6 +98,12 @@ let automatedOldOverlayDestroyed = false
 let automatedOldMessageCount = 0
 let automatedLiveStyleApplied = false
 let automatedExistingSpeedPreserved = false
+let automatedGenerationPolicy: GenerationPolicySmokeResult = {
+  defaultsVerified: false,
+  editable: false,
+  saveVerified: false,
+  restoreVerified: false
+}
 
 interface AutomatedComputedStyle {
   fontSize: string
@@ -143,9 +132,22 @@ interface DanmakuContentSmokeResult {
   eventText: string
 }
 
+interface GenerationPolicySmokeResult {
+  defaultsVerified: boolean
+  editable: boolean
+  saveVerified: boolean
+  restoreVerified: boolean
+}
+
 interface CloudUiSmokeResult {
   railFits: boolean
   noHorizontalOverflow: boolean
+  stageNavigationRemoved: boolean
+  cloudTestActionRemoved: boolean
+  generationPolicyInRail: boolean
+  generationPolicyDisabledWhileRunning: boolean
+  workspaceRuleRemoved: boolean
+  cloudSaveReachable: boolean
   drawerScrollable: boolean
   drawerBottomReachable: boolean
   keyHiddenFromRenderer: boolean
@@ -155,6 +157,68 @@ interface CloudUiSmokeResult {
   railClientHeight?: number
   cardBottom?: number
   viewportHeight?: number
+}
+
+async function verifyGenerationPolicy(): Promise<GenerationPolicySmokeResult> {
+  const window = controlWindow
+  if (!window || window.isDestroyed()) {
+    return { defaultsVerified: false, editable: false, saveVerified: false, restoreVerified: false }
+  }
+  return window.webContents.executeJavaScript(
+    `(async () => {
+      const wait = (milliseconds = 70) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+      const waitFor = async (check) => {
+        for (let index = 0; index < 40; index += 1) {
+          const value = await check()
+          if (value) return value
+          await wait()
+        }
+        return undefined
+      }
+      await waitFor(() => document.querySelector('[data-testid="generation-policy"]'))
+      const settings = await window.damu.getCloudApiSettings()
+      const defaultsVerified =
+        settings.minConfidence === 0.7 &&
+        settings.minIntervalMs === 12000 &&
+        settings.repeatCooldownMs === 30000 &&
+        settings.maxCallsPerMinute === 4
+      const panel = document.querySelector('[data-testid="generation-policy"]')
+      const confidence = panel?.querySelector('input[min="0.5"]')
+      const editable = confidence instanceof HTMLInputElement && !confidence.disabled
+      if (!editable) return { defaultsVerified, editable, saveVerified: false, restoreVerified: false }
+      confidence.value = '0.75'
+      confidence.dispatchEvent(new Event('input', { bubbles: true }))
+      await wait()
+      const save = document.querySelector('[data-testid="generation-policy-save"]')
+      if (!(save instanceof HTMLButtonElement) || save.disabled) {
+        return { defaultsVerified, editable, saveVerified: false, restoreVerified: false }
+      }
+      save.click()
+      const saved = await waitFor(async () => {
+        const current = await window.damu.getCloudApiSettings()
+        return current.minConfidence === 0.75
+      })
+      await wait(200)
+      const restoredPanel = document.querySelector('[data-testid="generation-policy"]')
+      const restoredConfidence = restoredPanel?.querySelector('input[min="0.5"]')
+      if (!(restoredConfidence instanceof HTMLInputElement)) {
+        return { defaultsVerified, editable, saveVerified: Boolean(saved), restoreVerified: false }
+      }
+      restoredConfidence.value = '0.7'
+      restoredConfidence.dispatchEvent(new Event('input', { bubbles: true }))
+      const restore = await waitFor(() => {
+        const button = document.querySelector('[data-testid="generation-policy-save"]')
+        return button instanceof HTMLButtonElement && !button.disabled ? button : undefined
+      })
+      if (!(restore instanceof HTMLButtonElement)) {
+        return { defaultsVerified, editable, saveVerified: Boolean(saved), restoreVerified: false }
+      }
+      restore.click()
+      const restored = await waitFor(async () => (await window.damu.getCloudApiSettings()).minConfidence === 0.7)
+      return { defaultsVerified, editable, saveVerified: Boolean(saved), restoreVerified: Boolean(restored) }
+    })()`,
+    true
+  ) as Promise<GenerationPolicySmokeResult>
 }
 
 function finishAutomatedDemo(status: 'ok' | 'error', payload: Record<string, unknown>): void {
@@ -365,6 +429,12 @@ async function verifyCloudApiUi(): Promise<CloudUiSmokeResult> {
     return {
       railFits: false,
       noHorizontalOverflow: false,
+      stageNavigationRemoved: false,
+      cloudTestActionRemoved: false,
+      generationPolicyInRail: false,
+      generationPolicyDisabledWhileRunning: false,
+      workspaceRuleRemoved: false,
+      cloudSaveReachable: false,
       drawerScrollable: false,
       drawerBottomReachable: false,
       keyHiddenFromRenderer: false,
@@ -386,6 +456,20 @@ async function verifyCloudApiUi(): Promise<CloudUiSmokeResult> {
       const cardRect = card.getBoundingClientRect()
       const railFits = rail.scrollHeight <= rail.clientHeight && cardRect.bottom <= innerHeight
       const noHorizontalOverflow = document.documentElement.scrollWidth <= document.documentElement.clientWidth
+      const stageNavigationRemoved = !rail.querySelector('.step-nav') && !rail.textContent?.includes('打包验收')
+      const cloudTestActionRemoved = !Array.from(card.querySelectorAll('button')).some((button) =>
+        button.textContent?.includes('测试')
+      )
+      const policyPanel = rail.querySelector('[data-testid="generation-policy"]')
+      const policySave = rail.querySelector('[data-testid="generation-policy-save"]')
+      const generationPolicyInRail = policyPanel instanceof HTMLElement
+      const generationPolicyDisabledWhileRunning =
+        policyPanel instanceof HTMLElement &&
+        Array.from(policyPanel.querySelectorAll('input')).every(
+          (control) => control instanceof HTMLInputElement && control.disabled
+        ) &&
+        policySave instanceof HTMLButtonElement && policySave.disabled
+      const workspaceRuleRemoved = !document.querySelector('.workspace [data-testid="global-rule-list"]')
       trigger.click()
       await wait()
       const drawer = document.querySelector('[data-testid="cloud-api-drawer"]')
@@ -400,6 +484,8 @@ async function verifyCloudApiUi(): Promise<CloudUiSmokeResult> {
       drawer.scrollTop = drawer.scrollHeight
       await wait()
       const footer = drawer.querySelector('footer')
+      const saveButton = drawer.querySelector('.cloud-save')
+      const cloudSaveReachable = saveButton instanceof HTMLButtonElement && !drawer.querySelector('.cloud-test')
       const drawerBottomReachable =
         footer instanceof HTMLElement && footer.getBoundingClientRect().bottom <= innerHeight + 1
       const drawerScrollable = drawer.scrollHeight > drawer.clientHeight && drawer.scrollTop > before
@@ -412,6 +498,12 @@ async function verifyCloudApiUi(): Promise<CloudUiSmokeResult> {
       return {
         railFits,
         noHorizontalOverflow,
+        stageNavigationRemoved,
+        cloudTestActionRemoved,
+        generationPolicyInRail,
+        generationPolicyDisabledWhileRunning,
+        workspaceRuleRemoved,
+        cloudSaveReachable,
         drawerScrollable,
         drawerBottomReachable,
         keyHiddenFromRenderer,
@@ -486,8 +578,8 @@ async function restartAutomatedDemo(): Promise<void> {
     { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL() },
     fixtureWindow.getBounds(),
     true,
-    { region: DEFAULT_ROI, preprocessMode: 'original' },
-    'profile'
+    { gameName: '', region: DEFAULT_ROI, preprocessMode: 'original' },
+    'profile_template'
   )
 }
 
@@ -586,44 +678,6 @@ async function saveCloudApiSettings(value: unknown): Promise<ReturnType<CloudApi
     throw error
   }
   return saved
-}
-
-async function testCloudApi(): Promise<CloudApiTestResult> {
-  if (!cloudApiStore) throw new Error('云端 API 配置存储尚未就绪')
-  if (captureRuntime || state.session !== 'idle') throw new Error('请先停止当前会话，再测试云端 API')
-  await backend.start()
-  await syncCloudApiSettings()
-  cloudApiState = { status: 'calling', model: cloudApiStore.getPublic().model }
-  broadcastCloudApiState()
-  try {
-    const result = await backend.request<BackendGenerationTestResult>('/api/v1/generation/test', {
-      method: 'POST',
-      body: JSON.stringify({ text: '胜利', local_text: '胜利' })
-    })
-    const mapped: CloudApiTestResult = {
-      text: result.text,
-      elapsedMs: result.elapsed_ms,
-      model: result.model,
-      ...(result.provider_request_id ? { providerRequestId: result.provider_request_id } : {})
-    }
-    cloudApiState = {
-      ...idleCloudApiState(),
-      model: result.model,
-      lastLatencyMs: result.elapsed_ms,
-      lastResult: result.text
-    }
-    broadcastCloudApiState()
-    return mapped
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    cloudApiState = {
-      status: message.includes('rate_limited') || message.startsWith('429') ? 'rate_limited' : 'error',
-      model: cloudApiStore.getPublic().model,
-      error: message
-    }
-    broadcastCloudApiState()
-    throw error
-  }
 }
 
 function broadcastEvent(envelope: EventEnvelope): void {
@@ -837,10 +891,11 @@ async function startSource(
   bounds?: Electron.Rectangle,
   preserveFixture = false,
   settings: Omit<CaptureStartOptions, 'sourceId'> = {
+    gameName: '',
     region: DEFAULT_ROI,
     preprocessMode: 'original'
   },
-  ruleScope: 'global' | 'profile' = 'global'
+  generationMode: 'ai' | 'profile_template' = 'ai'
 ): Promise<void> {
   await backend.start()
   if (captureRuntime) await stopActiveSession(!preserveFixture)
@@ -857,6 +912,7 @@ async function startSource(
 
   const profileBody: Record<string, unknown> = {
       name: source.name,
+      game_name: settings.gameName || null,
       window_title_pattern: source.name,
       regions: [
         {
@@ -867,7 +923,7 @@ async function startSource(
         }
       ]
   }
-  if (ruleScope === 'profile') {
+  if (generationMode === 'profile_template') {
     profileBody.rules = [
       {
         match_type: DEFAULT_RULE.matchType,
@@ -895,7 +951,7 @@ async function startSource(
       source_id: source.id,
       hwnd,
       window_name: source.name,
-      rule_scope: ruleScope
+      generation_mode: generationMode
     })
   })
   approvedSourceId = source.id
@@ -955,8 +1011,8 @@ async function startDemo(): Promise<void> {
     { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL() },
     fixtureWindow.getBounds(),
     true,
-    { region: DEFAULT_ROI, preprocessMode: 'original' },
-    'profile'
+    { gameName: '', region: DEFAULT_ROI, preprocessMode: 'original' },
+    'profile_template'
   )
 }
 
@@ -971,7 +1027,6 @@ function setupIpc(): void {
   ipcMain.handle('damu:save-cloud-api-settings', (_event, value: unknown) =>
     saveCloudApiSettings(value)
   )
-  ipcMain.handle('damu:test-cloud-api', () => testCloudApi())
   ipcMain.on('damu:overlay-style-ready', (event) => {
     const window = overlayWindow
     if (!window || window.isDestroyed() || event.sender !== window.webContents) return
@@ -990,49 +1045,10 @@ function setupIpc(): void {
     const region = profile?.regions[0]
     if (!region) return null
     return {
+      gameName: profile?.game_name ?? source.name,
       region: { x: region.x, y: region.y, width: region.width, height: region.height },
       preprocessMode: region.preprocess_mode
     }
-  })
-  ipcMain.handle('damu:get-global-rules', async () => {
-    await backend.start()
-    const rules = await backend.request<BackendRule[]>('/api/v1/rules/global')
-    return rules.map((rule) => ({
-      id: rule.id,
-      matchType: rule.match_type,
-      pattern: rule.pattern,
-      template: rule.template,
-      confidence: rule.confidence,
-      cooldownMs: rule.cooldown_ms,
-      enabled: rule.enabled
-    }))
-  })
-  ipcMain.handle('damu:update-global-rules', async (_event, value: unknown) => {
-    await backend.start()
-    const rules = parseGlobalRules(value)
-    const saved = await backend.request<BackendRule[]>('/api/v1/rules/global', {
-      method: 'PUT',
-      body: JSON.stringify(
-        rules.map((rule) => ({
-          ...(rule.id ? { id: rule.id } : {}),
-          match_type: rule.matchType,
-          pattern: rule.pattern,
-          template: rule.template,
-          confidence: rule.confidence,
-          cooldown_ms: rule.cooldownMs,
-          enabled: rule.enabled
-        }))
-      )
-    })
-    return saved.map((rule) => ({
-      id: rule.id,
-      matchType: rule.match_type,
-      pattern: rule.pattern,
-      template: rule.template,
-      confidence: rule.confidence,
-      cooldownMs: rule.cooldown_ms,
-      enabled: rule.enabled
-    }))
   })
   ipcMain.handle('damu:start-demo', () => startDemo())
   ipcMain.handle('damu:start-source', async (_event, value: unknown) => {
@@ -1043,6 +1059,7 @@ function setupIpc(): void {
     const source = sources.find((candidate) => candidate.id === sourceId)
     if (!source) throw new Error('选择的窗口已经不可用，请刷新窗口列表')
     await startSource(source, undefined, false, {
+      gameName: options.gameName,
       region: options.region,
       preprocessMode: options.preprocessMode
     })
@@ -1092,28 +1109,28 @@ function setupBackendEvents(): void {
   backend.on('event', (envelope: EventEnvelope) => {
     state.lastEvent = envelope.type
     if (envelope.type === 'recognition.detected') {
-      const evaluation = envelope.payload.rule_evaluation as { status?: unknown } | undefined
-      if (evaluation?.status === 'emitted' && cloudApiStore?.getPublic().enabled) {
+      const evaluation = envelope.payload.generation_evaluation as { status?: unknown; reason?: unknown } | undefined
+      if (evaluation?.status === 'calling' && cloudApiStore?.getPublic().enabled) {
         cloudApiState = { status: 'calling', model: cloudApiStore.getPublic().model }
+        broadcastCloudApiState()
+      } else if (evaluation?.status === 'rate_limited') {
+        cloudApiState = { status: 'rate_limited', model: cloudApiStore?.getPublic().model }
+        broadcastCloudApiState()
+      } else if (evaluation?.status === 'failed') {
+        cloudApiState = {
+          status: 'error',
+          model: cloudApiStore?.getPublic().model,
+          error: `云端生成失败：${String(evaluation.reason ?? 'unknown')}`
+        }
         broadcastCloudApiState()
       }
     }
     if (envelope.type === 'danmaku.created') {
-      const fallbackReason = typeof envelope.payload.fallback_reason === 'string'
-        ? envelope.payload.fallback_reason
-        : undefined
       if (envelope.payload.generator === 'cloud') {
         cloudApiState = {
           status: 'ready',
           model: typeof envelope.payload.model === 'string' ? envelope.payload.model : cloudApiStore?.getPublic().model,
           lastLatencyMs: typeof envelope.payload.generation_ms === 'number' ? envelope.payload.generation_ms : undefined
-        }
-        broadcastCloudApiState()
-      } else if (fallbackReason) {
-        cloudApiState = {
-          status: fallbackReason === 'rate_limited' ? 'rate_limited' : 'error',
-          model: cloudApiStore?.getPublic().model,
-          error: `云端生成失败，已回退本地模板：${fallbackReason}`
         }
         broadcastCloudApiState()
       }
@@ -1184,6 +1201,16 @@ function setupBackendEvents(): void {
             eventManagement.filteredClearVerified &&
             cloudUi.railFits &&
             cloudUi.noHorizontalOverflow &&
+            cloudUi.stageNavigationRemoved &&
+            cloudUi.cloudTestActionRemoved &&
+            automatedGenerationPolicy.defaultsVerified &&
+            automatedGenerationPolicy.editable &&
+            automatedGenerationPolicy.saveVerified &&
+            automatedGenerationPolicy.restoreVerified &&
+            cloudUi.generationPolicyInRail &&
+            cloudUi.generationPolicyDisabledWhileRunning &&
+            cloudUi.workspaceRuleRemoved &&
+            cloudUi.cloudSaveReachable &&
             cloudUi.drawerScrollable &&
             cloudUi.drawerBottomReachable &&
             cloudUi.keyHiddenFromRenderer &&
@@ -1221,6 +1248,16 @@ function setupBackendEvents(): void {
             event_filtered_clear_verified: eventManagement.filteredClearVerified,
             cloud_rail_fits_1100x720: cloudUi.railFits,
             cloud_no_horizontal_overflow: cloudUi.noHorizontalOverflow,
+            stage_navigation_removed: cloudUi.stageNavigationRemoved,
+            cloud_test_action_removed: cloudUi.cloudTestActionRemoved,
+            generation_policy_defaults_verified: automatedGenerationPolicy.defaultsVerified,
+            generation_policy_editable: automatedGenerationPolicy.editable,
+            generation_policy_save_verified: automatedGenerationPolicy.saveVerified,
+            generation_policy_restore_verified: automatedGenerationPolicy.restoreVerified,
+            generation_policy_in_rail: cloudUi.generationPolicyInRail,
+            generation_policy_disabled_while_running: cloudUi.generationPolicyDisabledWhileRunning,
+            workspace_global_rules_removed: cloudUi.workspaceRuleRemoved,
+            cloud_save_reachable: cloudUi.cloudSaveReachable,
             cloud_drawer_scrollable: cloudUi.drawerScrollable,
             cloud_drawer_bottom_reachable: cloudUi.drawerBottomReachable,
             cloud_key_hidden_from_renderer: cloudUi.keyHiddenFromRenderer,
@@ -1320,7 +1357,10 @@ if (!hasLock) {
     try {
       await backend.start()
       await syncCloudApiSettings()
-      if (automatedDemo) await startDemo()
+      if (automatedDemo) {
+        automatedGenerationPolicy = await verifyGenerationPolicy()
+        await startDemo()
+      }
     } catch (error) {
       state.backend = 'error'
       state.error = error instanceof Error ? error.message : String(error)

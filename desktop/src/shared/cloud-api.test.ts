@@ -13,7 +13,10 @@ function validInput() {
     model: 'demo-model',
     systemPrompt: DEFAULT_CLOUD_SYSTEM_PROMPT,
     timeoutMs: 5000,
-    maxCallsPerMinute: 10
+    minConfidence: 0.7,
+    minIntervalMs: 12000,
+    repeatCooldownMs: 30000,
+    maxCallsPerMinute: 4
   }
 }
 
@@ -37,7 +40,10 @@ describe('云端 API 配置校验', () => {
 
   it('拒绝超时、限额与提示词非法值', () => {
     expect(() => parseCloudApiSettingsUpdate({ ...validInput(), timeoutMs: 2000 }, false)).toThrow()
-    expect(() => parseCloudApiSettingsUpdate({ ...validInput(), maxCallsPerMinute: 61 }, false)).toThrow()
+    expect(() => parseCloudApiSettingsUpdate({ ...validInput(), maxCallsPerMinute: 13 }, false)).toThrow()
+    expect(() => parseCloudApiSettingsUpdate({ ...validInput(), minConfidence: 0.72 }, false)).toThrow()
+    expect(() => parseCloudApiSettingsUpdate({ ...validInput(), minIntervalMs: 4000 }, false)).toThrow()
+    expect(() => parseCloudApiSettingsUpdate({ ...validInput(), repeatCooldownMs: 9000 }, false)).toThrow()
     expect(() => parseCloudApiSettingsUpdate({ ...validInput(), systemPrompt: '' }, false)).toThrow()
   })
 

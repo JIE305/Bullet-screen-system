@@ -2,6 +2,9 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import {
   cloneDefaultCloudApiSettings,
+  DEFAULT_CLOUD_SYSTEM_PROMPT,
+  GAME_AWARE_CLOUD_SYSTEM_PROMPT,
+  LEGACY_CLOUD_SYSTEM_PROMPT,
   parseCloudApiSettingsUpdate,
   type CloudApiPublicSettings,
   type CloudApiSettingsUpdate
@@ -14,13 +17,16 @@ export interface SecretStorageAdapter {
 }
 
 interface StoredCloudApiSettings {
-  schemaVersion: 1
+  schemaVersion: 1 | 2 | 3
   enabled: boolean
   baseUrl: string
   model: string
   systemPrompt: string
   timeoutMs: number
   maxCallsPerMinute: number
+  minConfidence?: number
+  minIntervalMs?: number
+  repeatCooldownMs?: number
   encryptedApiKey?: string
 }
 
@@ -31,6 +37,9 @@ export interface CloudApiSecretConfig {
   model: string
   system_prompt: string
   timeout_ms: number
+  min_confidence: number
+  min_interval_ms: number
+  repeat_cooldown_ms: number
   max_calls_per_minute: number
 }
 
@@ -48,15 +57,22 @@ export class CloudApiStore {
   async load(): Promise<CloudApiPublicSettings> {
     try {
       const raw = JSON.parse(await readFile(this.filePath, 'utf8')) as StoredCloudApiSettings
-      if (raw.schemaVersion !== 1) throw new Error('unknown_schema_version')
+      if (![1, 2, 3].includes(raw.schemaVersion)) throw new Error('unknown_schema_version')
+      const migratedPrompt = [LEGACY_CLOUD_SYSTEM_PROMPT, GAME_AWARE_CLOUD_SYSTEM_PROMPT].includes(raw.systemPrompt)
+        ? DEFAULT_CLOUD_SYSTEM_PROMPT
+        : raw.systemPrompt
+      const defaults = cloneDefaultCloudApiSettings()
       const parsed = parseCloudApiSettingsUpdate(
         {
           enabled: false,
           baseUrl: raw.baseUrl,
           model: raw.model,
-          systemPrompt: raw.systemPrompt,
+          systemPrompt: migratedPrompt,
           timeoutMs: raw.timeoutMs,
-          maxCallsPerMinute: raw.maxCallsPerMinute
+          minConfidence: raw.minConfidence ?? defaults.minConfidence,
+          minIntervalMs: raw.minIntervalMs ?? defaults.minIntervalMs,
+          repeatCooldownMs: raw.repeatCooldownMs ?? defaults.repeatCooldownMs,
+          maxCallsPerMinute: Math.min(raw.maxCallsPerMinute, 12)
         },
         false
       )
@@ -70,16 +86,22 @@ export class CloudApiStore {
         }
       }
       this.settings = {
-        schemaVersion: 1,
+        schemaVersion: 3,
         enabled: raw.enabled && Boolean(this.apiKey),
         baseUrl: parsed.baseUrl,
         model: parsed.model,
         systemPrompt: parsed.systemPrompt,
         timeoutMs: parsed.timeoutMs,
+        minConfidence: parsed.minConfidence,
+        minIntervalMs: parsed.minIntervalMs,
+        repeatCooldownMs: parsed.repeatCooldownMs,
         maxCallsPerMinute: parsed.maxCallsPerMinute,
         hasApiKey: Boolean(this.apiKey),
         secretStorage: this.apiKey ? 'encrypted' : 'none',
         ...(warning ? { warning } : {})
+      }
+      if (raw.schemaVersion !== 3 || migratedPrompt !== raw.systemPrompt || raw.maxCallsPerMinute > 12) {
+        await this.persist()
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -103,6 +125,9 @@ export class CloudApiStore {
       model: this.settings.model,
       system_prompt: this.settings.systemPrompt,
       timeout_ms: this.settings.timeoutMs,
+      min_confidence: this.settings.minConfidence,
+      min_interval_ms: this.settings.minIntervalMs,
+      repeat_cooldown_ms: this.settings.repeatCooldownMs,
       max_calls_per_minute: this.settings.maxCallsPerMinute
     }
   }
@@ -117,24 +142,36 @@ export class CloudApiStore {
       : undefined
     if (warning) this.warn(warning)
     this.settings = {
-      schemaVersion: 1,
+      schemaVersion: 3,
       enabled: parsed.enabled && Boolean(this.apiKey),
       baseUrl: parsed.baseUrl,
       model: parsed.model,
       systemPrompt: parsed.systemPrompt,
       timeoutMs: parsed.timeoutMs,
+      minConfidence: parsed.minConfidence,
+      minIntervalMs: parsed.minIntervalMs,
+      repeatCooldownMs: parsed.repeatCooldownMs,
       maxCallsPerMinute: parsed.maxCallsPerMinute,
       hasApiKey: Boolean(this.apiKey),
       secretStorage: this.apiKey ? (encryptionAvailable ? 'encrypted' : 'memory') : 'none',
       ...(warning ? { warning } : {})
     }
+    await this.persist()
+    return this.getPublic()
+  }
+
+  private async persist(): Promise<void> {
+    const encryptionAvailable = this.secrets.isEncryptionAvailable()
     const stored: StoredCloudApiSettings = {
-      schemaVersion: 1,
+      schemaVersion: 3,
       enabled: this.settings.enabled,
       baseUrl: this.settings.baseUrl,
       model: this.settings.model,
       systemPrompt: this.settings.systemPrompt,
       timeoutMs: this.settings.timeoutMs,
+      minConfidence: this.settings.minConfidence,
+      minIntervalMs: this.settings.minIntervalMs,
+      repeatCooldownMs: this.settings.repeatCooldownMs,
       maxCallsPerMinute: this.settings.maxCallsPerMinute,
       ...(this.apiKey && encryptionAvailable
         ? { encryptedApiKey: this.secrets.encryptString(this.apiKey).toString('base64') }
@@ -148,6 +185,5 @@ export class CloudApiStore {
     }
     this.writeChain = this.writeChain.catch(() => undefined).then(persist)
     await this.writeChain
-    return this.getPublic()
   }
 }

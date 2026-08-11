@@ -1,8 +1,8 @@
 # DaMuSystem
 
-DaMuSystem 是面向 Windows 窗口化游戏的本地画面弹幕实验项目。Electron 负责窗口选择、画面采集和透明覆盖显示，Python 服务负责识别、规则和后续持久化。
+DaMuSystem 是面向 Windows 窗口化游戏的本地画面弹幕实验项目。Electron 负责窗口选择、画面采集和透明覆盖显示，Python 服务负责 OCR、保守的 AI 生成调度和持久化。
 
-当前进度：**第 1 周已封板，第 2、3 周核心功能已完成，第 4 周进入候选版本验收**。项目已具备 RapidOCR、单 ROI、规则去重/冷却、SQLite 六表持久化、PyInstaller 后端和 Electron Windows 安装包。
+当前进度：**第 1 周已封板，第 2、3 周核心功能已完成，第 4 周进入候选版本验收**。项目已具备 RapidOCR、单 ROI、OCR 直连 AI、调用频率控制、SQLite 六表持久化、PyInstaller 后端和 Electron Windows 安装包。
 
 ## 环境
 
@@ -33,8 +33,8 @@ DaMuSystem 是面向 Windows 窗口化游戏的本地画面弹幕实验项目。
 1. 启动应用，等待顶部状态变为“后端在线 / WS 已连接”。
 2. 点击“启动内置测试链路”。
 3. 应用打开测试画面，隐藏采集窗口以约 1 FPS 上传 JPEG。
-4. 在“识别区域”和“弹幕规则”中调整 ROI、预处理、关键词、阈值和冷却。
-5. Python 的 RapidOCR 返回真实识别结果，经去重与规则生成弹幕。
+4. 在“识别区域”调整 ROI 和预处理；在左侧设置 AI 最低置信度、调用间隔、同文冷却和每分钟上限。
+5. 内置测试链路使用固定模板且不调用 API；真实窗口通过 RapidOCR 识别后，在预算允许时由 AI 生成弹幕。
 6. 透明覆盖层显示弹幕；点击“停止会话”结束采集。
 
 ## Windows 打包

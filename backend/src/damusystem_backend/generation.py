@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import uuid4
 
 import httpx
 
-from .contracts import GenerationConfig, GenerationTestResult
+from .contracts import GenerationConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,13 +19,18 @@ class GenerationOutput:
     text: str
     generator: str
     generation_ms: float
-    fallback_reason: str | None = None
     model: str | None = None
     provider_request_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DanmakuGenerationInput:
+    game_name: str | None
+    ocr_text: str
+
+
 class DanmakuGenerator(Protocol):
-    async def generate(self, ocr_text: str, local_text: str) -> GenerationOutput: ...
+    async def generate(self, value: DanmakuGenerationInput) -> GenerationOutput: ...
 
     async def close(self) -> None: ...
 
@@ -35,21 +41,40 @@ class GenerationFailure(Exception):
         self.reason = reason
 
 
-class MinuteRateLimiter:
-    def __init__(self, limit: int) -> None:
-        self._limit = limit
+class GenerationBudget:
+    def __init__(
+        self,
+        config: GenerationConfig,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._config = config.model_copy(deep=True)
+        self._clock = clock
         self._calls: deque[float] = deque()
+        self._last_call: float | None = None
+        self._last_by_text: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> bool:
+    async def acquire(self, value: DanmakuGenerationInput) -> str | None:
         async with self._lock:
-            now = time.monotonic()
+            now = self._clock()
             while self._calls and now - self._calls[0] >= 60:
                 self._calls.popleft()
-            if len(self._calls) >= self._limit:
-                return False
+            normalize = lambda text: " ".join(
+                unicodedata.normalize("NFKC", text).strip().casefold().split()
+            )
+            key = (normalize(value.game_name or ""), normalize(value.ocr_text))
+            repeated_at = self._last_by_text.get(key)
+            if repeated_at is not None and now - repeated_at < self._config.repeat_cooldown_ms / 1000:
+                return "repeat_limited"
+            if self._last_call is not None and now - self._last_call < self._config.min_interval_ms / 1000:
+                return "interval_limited"
+            if len(self._calls) >= self._config.max_calls_per_minute:
+                return "rate_limited"
             self._calls.append(now)
-            return True
+            self._last_call = now
+            self._last_by_text[key] = now
+            return None
 
 
 def clean_generated_text(value: str) -> str:
@@ -63,14 +88,6 @@ def clean_generated_text(value: str) -> str:
     return text[:60].strip()
 
 
-class TemplateDanmakuGenerator:
-    async def generate(self, ocr_text: str, local_text: str) -> GenerationOutput:
-        return GenerationOutput(local_text, "template", 0)
-
-    async def close(self) -> None:
-        return None
-
-
 class CloudLLMGenerator:
     def __init__(
         self,
@@ -79,16 +96,13 @@ class CloudLLMGenerator:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config.model_copy(deep=True)
-        self._limiter = MinuteRateLimiter(config.max_calls_per_minute)
         self._client = httpx.AsyncClient(
             timeout=config.timeout_ms / 1000,
             transport=transport,
             follow_redirects=False,
         )
 
-    async def generate(self, ocr_text: str, local_text: str) -> GenerationOutput:
-        if not await self._limiter.acquire():
-            raise GenerationFailure("rate_limited")
+    async def generate(self, value: DanmakuGenerationInput) -> GenerationOutput:
         started = time.perf_counter()
         client_request_id = str(uuid4())
         try:
@@ -105,11 +119,14 @@ class CloudLLMGenerator:
                         {"role": "system", "content": self._config.system_prompt},
                         {
                             "role": "user",
-                            "content": f"OCR 文字：{ocr_text}\n本地规则结果：{local_text}",
+                            "content": (
+                                f"游戏名称候选：{value.game_name or '未知'}\n"
+                                f"OCR 文字：{value.ocr_text[:300]}"
+                            ),
                         },
                     ],
                     "temperature": 0.8,
-                    "max_tokens": 80,
+                    "max_tokens": 64,
                     "stream": False,
                 },
             )
@@ -148,28 +165,40 @@ class CloudLLMGenerator:
         await self._client.aclose()
 
 
-class FallbackDanmakuGenerator:
+class DirectAiDanmakuGenerator:
     def __init__(
         self,
+        config: GenerationConfig,
         cloud: CloudLLMGenerator | None,
-        template: TemplateDanmakuGenerator | None = None,
+        budget: GenerationBudget,
     ) -> None:
+        self._config = config.model_copy(deep=True)
         self._cloud = cloud
-        self._template = template or TemplateDanmakuGenerator()
+        self._budget = budget
 
-    async def generate(self, ocr_text: str, local_text: str) -> GenerationOutput:
+    @property
+    def minimum_confidence(self) -> float:
+        return self._config.min_confidence
+
+    @property
+    def configured(self) -> bool:
+        return self._cloud is not None
+
+    async def generate(self, value: DanmakuGenerationInput) -> GenerationOutput:
         if self._cloud is None:
-            return await self._template.generate(ocr_text, local_text)
-        try:
-            return await self._cloud.generate(ocr_text, local_text)
-        except GenerationFailure as exc:
-            local = await self._template.generate(ocr_text, local_text)
-            return GenerationOutput(
-                text=local.text,
-                generator="template",
-                generation_ms=local.generation_ms,
-                fallback_reason=exc.reason,
-            )
+            raise GenerationFailure("cloud_unavailable")
+        limited = await self.reserve(value)
+        if limited:
+            raise GenerationFailure(limited)
+        return await self.generate_reserved(value)
+
+    async def reserve(self, value: DanmakuGenerationInput) -> str | None:
+        return await self._budget.acquire(value)
+
+    async def generate_reserved(self, value: DanmakuGenerationInput) -> GenerationOutput:
+        if self._cloud is None:
+            raise GenerationFailure("cloud_unavailable")
+        return await self._cloud.generate(value)
 
     async def close(self) -> None:
         if self._cloud is not None:
@@ -185,6 +214,7 @@ class GenerationService:
     ) -> None:
         self._config = (config or GenerationConfig()).model_copy(deep=True)
         self._transport = transport
+        self._budget = GenerationBudget(self._config)
 
     @property
     def configured(self) -> bool:
@@ -197,27 +227,12 @@ class GenerationService:
 
     def configure(self, config: GenerationConfig) -> None:
         self._config = config.model_copy(deep=True)
+        self._budget = GenerationBudget(self._config)
 
-    def create_generator(self) -> FallbackDanmakuGenerator:
+    def create_generator(self) -> DirectAiDanmakuGenerator:
         cloud = (
             CloudLLMGenerator(self._config, transport=self._transport)
             if self.configured
             else None
         )
-        return FallbackDanmakuGenerator(cloud)
-
-    async def test(self, ocr_text: str, local_text: str) -> GenerationTestResult:
-        if not (self._config.base_url and self._config.api_key and self._config.model):
-            raise GenerationFailure("configuration_incomplete")
-        config = self._config.model_copy(update={"enabled": True})
-        cloud = CloudLLMGenerator(config, transport=self._transport)
-        try:
-            output = await cloud.generate(ocr_text, local_text)
-            return GenerationTestResult(
-                text=output.text,
-                elapsed_ms=output.generation_ms,
-                model=config.model,
-                provider_request_id=output.provider_request_id,
-            )
-        finally:
-            await cloud.close()
+        return DirectAiDanmakuGenerator(self._config, cloud, self._budget)

@@ -1,5 +1,4 @@
 import type { AppState, CaptureSourceInfo, DaMuApi, EventEnvelope } from '../../shared/contracts'
-import type { RuleSettings } from '../../shared/capture-settings'
 import {
   cloneDefaultOverlayStyle,
   parseOverlayStyleSettings,
@@ -16,7 +15,6 @@ const overlayResetCallbacks = new Set<() => void>()
 const overlayStyleCallbacks = new Set<(settings: OverlayStyleSettings) => void>()
 const cloudApiStateCallbacks = new Set<(state: CloudApiRuntimeState) => void>()
 let mockOverlayStyle = cloneDefaultOverlayStyle()
-let mockGlobalRules: RuleSettings[] = []
 let mockCloudSettings = cloneDefaultCloudApiSettings()
 let mockCloudState: CloudApiRuntimeState = { status: 'unconfigured' }
 let mockState: AppState = {
@@ -63,21 +61,19 @@ const browserPreviewApi: DaMuApi = {
   },
   startSource: async () => browserPreviewApi.startDemo(),
   getCaptureSettings: async () => null,
-  getGlobalRules: async () => mockGlobalRules.map((rule) => ({ ...rule })),
-  updateGlobalRules: async (rules) => {
-    mockGlobalRules = rules.map((rule) => ({ ...rule, id: rule.id ?? crypto.randomUUID() }))
-    return mockGlobalRules.map((rule) => ({ ...rule }))
-  },
   getCloudApiSettings: async () => ({ ...mockCloudSettings }),
   saveCloudApiSettings: async (input) => {
     const hasApiKey = input.deleteApiKey ? false : Boolean(input.apiKey) || mockCloudSettings.hasApiKey
     mockCloudSettings = {
-      schemaVersion: 1,
+      schemaVersion: 3,
       enabled: input.enabled && hasApiKey,
       baseUrl: input.baseUrl,
       model: input.model,
       systemPrompt: input.systemPrompt,
       timeoutMs: input.timeoutMs,
+      minConfidence: input.minConfidence,
+      minIntervalMs: input.minIntervalMs,
+      repeatCooldownMs: input.repeatCooldownMs,
       maxCallsPerMinute: input.maxCallsPerMinute,
       hasApiKey,
       secretStorage: hasApiKey ? 'memory' : 'none'
@@ -88,23 +84,6 @@ const browserPreviewApi: DaMuApi = {
     }
     for (const callback of cloudApiStateCallbacks) callback({ ...mockCloudState })
     return { ...mockCloudSettings }
-  },
-  testCloudApi: async () => {
-    mockCloudState = { status: 'calling', model: mockCloudSettings.model }
-    for (const callback of cloudApiStateCallbacks) callback({ ...mockCloudState })
-    const result = {
-      text: '这波胜利太漂亮了！',
-      elapsedMs: 128,
-      model: mockCloudSettings.model || 'preview-model'
-    }
-    mockCloudState = {
-      status: mockCloudSettings.enabled ? 'ready' : 'disabled',
-      model: result.model,
-      lastLatencyMs: result.elapsedMs,
-      lastResult: result.text
-    }
-    for (const callback of cloudApiStateCallbacks) callback({ ...mockCloudState })
-    return result
   },
   stopSession: async () => {
     for (const callback of overlayResetCallbacks) callback()

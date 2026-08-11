@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_ROI, DEFAULT_RULE, parseCaptureStartOptions, parseGlobalRules } from './capture-settings'
+import { DEFAULT_ROI, parseCaptureStartOptions } from './capture-settings'
 
 describe('采集设置校验', () => {
   const valid = {
     sourceId: 'window:1:0',
+    gameName: '英雄联盟',
     region: DEFAULT_ROI,
     preprocessMode: 'original' as const
   }
@@ -17,14 +18,8 @@ describe('采集设置校验', () => {
     expect(() => parseCaptureStartOptions({ ...valid, region: { x: 0, y: 0, width: 0.01, height: 1 } })).toThrow(/ROI/)
   })
 
-  it('拒绝空关键词和缺少 text 占位符的模板', () => {
-    expect(() => parseGlobalRules([{ ...DEFAULT_RULE, pattern: '' }])).toThrow(/规则/)
-    expect(() => parseGlobalRules([{ ...DEFAULT_RULE, template: '固定文字' }])).toThrow(/规则/)
-  })
-
-  it('接受多条全局规则并拒绝非法列表', () => {
-    const rules = [DEFAULT_RULE, { ...DEFAULT_RULE, pattern: '胜利', template: '{text}' }]
-    expect(parseGlobalRules(rules)).toEqual(rules)
-    expect(() => parseGlobalRules({ rules })).toThrow(/列表/)
+  it('规范化游戏名称并拒绝过长名称', () => {
+    expect(parseCaptureStartOptions({ ...valid, gameName: '  英雄联盟  ' }).gameName).toBe('英雄联盟')
+    expect(() => parseCaptureStartOptions({ ...valid, gameName: '游'.repeat(121) })).toThrow(/游戏名称/)
   })
 })

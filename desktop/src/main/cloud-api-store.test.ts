@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_CLOUD_SYSTEM_PROMPT } from '../shared/cloud-api'
+import { DEFAULT_CLOUD_SYSTEM_PROMPT, LEGACY_CLOUD_SYSTEM_PROMPT } from '../shared/cloud-api'
 import { CloudApiStore, type SecretStorageAdapter } from './cloud-api-store'
 
 const temporaryDirectories: string[] = []
@@ -30,7 +30,10 @@ function update(apiKey = 'top-secret') {
     model: 'demo-model',
     systemPrompt: DEFAULT_CLOUD_SYSTEM_PROMPT,
     timeoutMs: 5000,
-    maxCallsPerMinute: 10
+    minConfidence: 0.7,
+    minIntervalMs: 12000,
+    repeatCooldownMs: 30000,
+    maxCallsPerMinute: 4
   }
 }
 
@@ -87,5 +90,59 @@ describe('云端 API 密钥存储', () => {
     await writeFile(path, '{broken', 'utf8')
     expect(await store.load()).toMatchObject({ enabled: false, hasApiKey: false })
     expect(warn).toHaveBeenCalledOnce()
+  })
+
+  it('旧版默认提示词自动迁移到 v3 OCR 直连提示词并补充保守策略', async () => {
+    const { store, path } = await makeStore()
+    await writeFile(path, JSON.stringify({
+      schemaVersion: 1,
+      enabled: false,
+      baseUrl: '',
+      model: '',
+      systemPrompt: LEGACY_CLOUD_SYSTEM_PROMPT,
+      timeoutMs: 5000,
+      maxCallsPerMinute: 10
+    }), 'utf8')
+    const loaded = await store.load()
+    expect(loaded.schemaVersion).toBe(3)
+    expect(loaded.systemPrompt).toBe(DEFAULT_CLOUD_SYSTEM_PROMPT)
+    expect(loaded).toMatchObject({
+      minConfidence: 0.7,
+      minIntervalMs: 12000,
+      repeatCooldownMs: 30000,
+      maxCallsPerMinute: 10
+    })
+    expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({
+      schemaVersion: 3,
+      systemPrompt: DEFAULT_CLOUD_SYSTEM_PROMPT
+    })
+  })
+
+  it('v2 配置迁移时把过高的每分钟上限收紧到 12', async () => {
+    const { store, path } = await makeStore()
+    await writeFile(path, JSON.stringify({
+      schemaVersion: 2,
+      enabled: false,
+      baseUrl: '',
+      model: '',
+      systemPrompt: DEFAULT_CLOUD_SYSTEM_PROMPT,
+      timeoutMs: 5000,
+      maxCallsPerMinute: 60
+    }), 'utf8')
+    expect(await store.load()).toMatchObject({ schemaVersion: 3, maxCallsPerMinute: 12 })
+  })
+
+  it('旧版用户自定义提示词在迁移时保持不变', async () => {
+    const { store, path } = await makeStore()
+    await writeFile(path, JSON.stringify({
+      schemaVersion: 1,
+      enabled: false,
+      baseUrl: '',
+      model: '',
+      systemPrompt: '这是用户自定义的提示词',
+      timeoutMs: 5000,
+      maxCallsPerMinute: 10
+    }), 'utf8')
+    expect((await store.load()).systemPrompt).toBe('这是用户自定义的提示词')
   })
 })
