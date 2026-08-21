@@ -24,3 +24,7 @@ backend/dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 忽略项目根目录下的文档目录
+/docs/
+
